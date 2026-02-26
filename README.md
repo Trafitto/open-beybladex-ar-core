@@ -113,13 +113,18 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 
 | Variable | Effect of increasing | Effect of decreasing |
 |----------|----------------------|------------------------|
+| **HOUGH_DETECTION_CHANNEL** | `"saturation"` = HSV S (better for white floor vs colored chips); `"grayscale"` = luminance | |
+| **HOUGH_SAT_SCALE** | Boost colored chips vs white floor (1.2-1.5); higher = stronger contrast | Lower = raw saturation |
+| **HOUGH_SAT_FLOOR** | Clip values below this to 0; suppress near-white noise (0 = disabled) | |
+| **HOUGH_SAT_CLAHE_ENABLED** | Apply CLAHE to S channel for uneven arena lighting | False = no CLAHE on S |
 | **HOUGH_PARAM2** | Fewer circle detections, cleaner but may miss blurry beys | More detections, noisier (false circles from edges, glare) |
 | **HOUGH_MIN_RADIUS / HOUGH_MAX_RADIUS** | Only larger circles detected | Only smaller circles detected; adjust to match bey size in pixels |
 | **HOUGH_MIN_DIST** | Fewer duplicate circles for same bey; may miss when 2 beys are close | More circles, risk of double-tracking one bey |
 | **ARENA_ROI** radius (3rd value) | Larger search area; includes stadium perimeter | Smaller area; focuses on white floor only |
 | **ARENA_ROI_HIGH / LOW** | Dual ROI: high (red, center) checked first; if 2 beys there, done | Set HIGH = None to use single ARENA_ROI |
 | **PREFER_HIGH_PRIORITY** | When full, replace edge bey with unmatched center candidate | False = never replace |
-| **REJECT_HUE_RANGES** | Add more hue ranges to exclude (e.g. `[(98, 142), (0, 5)]`) | Fewer exclusions; set `[]` to disable (needed for green beys) |
+| **REJECT_HUE_RANGES** | Add more hue ranges to exclude (e.g. `[(35, 95)]` for green rail) | Fewer exclusions; set `[]` to disable (needed for green beys) |
+| **REJECT_NEAR_RIM_FRACTION** | Reject circles in outer X of arena; 0.10 = outer 10% (green rail zone) | 0 = disabled; lower = allow beys nearer rim |
 | **COLOR_SAT_MIN** | Stricter: only vivid chips accepted | More permissive: paler chips accepted, risk of white glare |
 | **COLOR_CENTER_MIN_FILL** | Stricter: more of center must be coloured | More permissive for small chips or motion blur |
 | **MATCH_MAX_DISTANCE** | Tracks faster motion; may wrong-match when beys cross | More stable identity; may lose track when bey moves fast |
@@ -140,7 +145,7 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 
 - **Bey1 and bey2 swap when they cross**: Raise `MATCH_IDENTITY_WEIGHT` (e.g. `8`–`12`), set `IDENTITY_HUE_MAX_DRIFT` (e.g. `35`) to reject bad matches, increase `IDENTITY_BOOTSTRAP_FRAMES` (e.g. `15`) for a stable identity.
 - **Tracker runs away when bey is briefly lost**: Set `KALMAN_MAX_VELOCITY_PX` (e.g. `60`–`100`) to reject extreme predictions and hold position until Hough re-acquires the circle.
-- **Tracking stadium rail instead of beys**: Lower `ARENA_ROI` radius (e.g. `0.35`) or add `REJECT_HUE_RANGES = [(98, 142)]` for the green X-rail.
+- **Tracking stadium rail instead of beys**: Set `REJECT_NEAR_RIM_FRACTION = 0.10` (rejects circles in outer 10%), lower `ARENA_ROI` radius, or add `REJECT_HUE_RANGES = [(35, 95)]` for green rail (only if not using green beys).
 - **Beys blur and disappear**: Lower `HOUGH_PARAM2` (e.g. `12`–`14`), raise `MATCH_MAX_DISTANCE` and `KALMAN_MAX_PREDICTION_DRIFT`.
 - **Tracker locks onto wrong objects**: Shrink `ARENA_ROI`, tune `REJECT_HUE_RANGES`, lower `MAX_RECOVERY_FRAMES` so it resets sooner.
 - **Using green Beyblades**: Set `REJECT_HUE_RANGES = []` so green chips are not rejected.

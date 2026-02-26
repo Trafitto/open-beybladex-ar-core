@@ -389,6 +389,18 @@ class BeyTracker:
         rcx, rcy, rr = self._arena_roi_high
         return distance((x, y), (rcx, rcy)) <= rr
 
+    def _near_rim(self, x: float, y: float) -> bool:
+        """True if (x,y) is in the outer band where the green rail sits."""
+        frac = float(getattr(config, "REJECT_NEAR_RIM_FRACTION", 0))
+        if frac <= 0:
+            return False
+        stadium = self._rim_circle or self._arena_roi_low or self._arena_roi
+        if stadium is None:
+            return False
+        rcx, rcy, rr = stadium
+        d = distance((x, y), (rcx, rcy))
+        return d >= rr * (1.0 - frac)
+
     def auto_detect_roi_from_reference(
         self, reference: np.ndarray, frame: np.ndarray
     ) -> bool:
@@ -582,9 +594,9 @@ class BeyTracker:
     # ------------------------------------------------------------------ #
 
     def _detect_circles_hough(
-        self, gray: np.ndarray, frame_shape: Tuple[int, ...]
+        self, channel: np.ndarray, frame_shape: Tuple[int, ...]
     ) -> List[Tuple[Tuple[int, int], int]]:
-        """Run HoughCircles on the grayscale image.
+        """Run HoughCircles on a single-channel image (saturation or grayscale).
 
         Returns list of ((cx, cy), radius) inside the ROI.
         """
@@ -596,7 +608,7 @@ class BeyTracker:
             min(config.HOUGH_MAX_RADIUS, int(0.18 * min_dim)),
         )
         blurred = cv2.GaussianBlur(
-            gray, config.GAUSSIAN_BLUR_KSIZE, config.GAUSSIAN_BLUR_SIGMA
+            channel, config.GAUSSIAN_BLUR_KSIZE, config.GAUSSIAN_BLUR_SIGMA
         )
         circles = cv2.HoughCircles(
             blurred,
@@ -753,9 +765,26 @@ class BeyTracker:
         """One tracking cycle: Hough -> color -> match -> Kalman."""
         self._frame_index += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if getattr(config, "HOUGH_DETECTION_CHANNEL", "grayscale") == "saturation":
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            s = hsv[:, :, 1].astype(np.float32)
+            s *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
+            s = np.clip(s, 0, 255).astype(np.uint8)
+            floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
+            if floor > 0:
+                s = np.where(s >= floor, s, 0).astype(np.uint8)
+            if getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False):
+                clahe = cv2.createCLAHE(
+                    clipLimit=float(getattr(config, "HOUGH_SAT_CLAHE_CLIP", 2.5)),
+                    tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
+                )
+                s = clahe.apply(s)
+            channel = s
+        else:
+            channel = gray
 
         # --- 1. Hough circles ---
-        circles = self._detect_circles_hough(gray, frame.shape)
+        circles = self._detect_circles_hough(channel, frame.shape)
 
         # --- 2. Sample center color, reject rim-coloured circles ---
         all_candidates: List[Tuple[float, float, float, float]] = []
@@ -768,6 +797,8 @@ class BeyTracker:
                     continue
             reject_ranges = getattr(config, "REJECT_HUE_RANGES", [])
             if any(lo <= hue <= hi for lo, hi in reject_ranges):
+                continue
+            if self._near_rim(cx, cy):
                 continue
             all_candidates.append((float(cx), float(cy), float(r), hue))
 

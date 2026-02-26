@@ -18,10 +18,25 @@ TARGET_FPS = 60           # Target frame rate when using live camera
 # HOUGH_MIN_RADIUS, HOUGH_MAX_RADIUS: px range for bey circle size
 HOUGH_DP = 1.2
 HOUGH_MIN_DIST = 25
-HOUGH_PARAM1 = 70
-HOUGH_PARAM2 = 20
+HOUGH_PARAM1 = 80
+HOUGH_PARAM2 = 14
 HOUGH_MIN_RADIUS = 10
 HOUGH_MAX_RADIUS = 20
+
+# Hough input channel: "saturation" (HSV S) or "grayscale"
+# Saturation gives better contrast: white floor = low S, colored chips = high S
+# Grayscale can blend gray/silver bey parts with white stadium
+HOUGH_DETECTION_CHANNEL = "saturation"
+
+# Saturation channel tuning (only when HOUGH_DETECTION_CHANNEL == "saturation")
+# HOUGH_SAT_SCALE: multiply S channel (1.0 = no change); >1 boosts colored vs white
+# HOUGH_SAT_FLOOR: clip values below this to 0 (suppress near-white noise, 0 = disabled)
+# HOUGH_SAT_CLAHE_ENABLED: apply CLAHE to S for uneven lighting across arena
+# HOUGH_SAT_CLAHE_CLIP: CLAHE clip limit when enabled (2-4 typical)
+HOUGH_SAT_SCALE = 1
+HOUGH_SAT_FLOOR = 5
+HOUGH_SAT_CLAHE_ENABLED = False
+HOUGH_SAT_CLAHE_CLIP = 2.5
 
 # Preprocessing (Gaussian blur before Hough)
 # GAUSSIAN_BLUR_KSIZE: (width, height), odd numbers; larger = smoother
@@ -45,7 +60,7 @@ HSV_SAT_SCALE = 1.15
 # PREFER_HIGH_PRIORITY: when full, replace an edge bey with unmatched center candidate
 ARENA_ROI = (0.5, 0.52, 0.60)
 PREFER_HIGH_PRIORITY = True
-ARENA_ROI_HIGH = (0.5, 0.40, 0.35)
+ARENA_ROI_HIGH = (0.5, 0.40, 0.40)
 ARENA_ROI_LOW = (0.5, 0.52, 0.60)
 ARENA_REFERENCE_DIR = "references/arena"
 ARENA_RIM_SHRINK = 0.70
@@ -85,6 +100,10 @@ COLOR_VAL_MIN = 40
 COLOR_CENTER_MIN_FILL = 0.10
 COLOR_MIN_HUE_SEPARATION = 10
 REJECT_HUE_RANGES = []   # Beyblade X stadium green X-rail; set [] if using green beys
+# REJECT_NEAR_RIM_FRACTION: reject circles in outer X of arena (0 = disabled)
+# Green rail sits at the rim; 0.08-0.12 rejects rail false positives, allows edge beys
+REJECT_NEAR_RIM_FRACTION = 0.10
+
 COLOR_HUE_TOLERANCE = 22
 COLOR_ADAPT_RATE = 0.05
 
