@@ -1,0 +1,12 @@
+.venv/
+output/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+videos/
+references/
+output/
