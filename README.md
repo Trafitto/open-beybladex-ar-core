@@ -11,6 +11,9 @@ The first demo shows the tracking output with the debug overlay enabled. The sec
 ![Demo 1](demo/demo1.gif)
 ![Demo 2](demo/demo2.gif)
 
+The core tracker broadcasts bey position, velocity and collision events to the sibling project `open_beybladex_ar_web` via WebSocket (`-w`). That project renders the SFX overlay and projection in the browser. The video below shows the output captured from the web client.
+![Demo 2](demo/test_video_output.gif)
+
 ## Requirements
 
 - Python 3.10 or higher
@@ -144,4 +147,4 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 
 ## Web SFX Projection
 
-Sibling project `open_beybladex_ar_web` provides a browser-based SFX output for projection. Run the core with `-w`/`--web` to broadcast tracking data via WebSocket. See `../open_beybladex_ar_web/README.md` for setup.
+Sibling project [open_beybladex_ar_web](https://github.com/Trafitto/open-beybladex-ar-web) provides a browser-based SFX output for projection. Run the core with `-w`/`--web` to broadcast tracking data via WebSocket. See the web project's README for setup.
