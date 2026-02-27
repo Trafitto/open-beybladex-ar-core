@@ -167,10 +167,14 @@ def _run_main_loop(
             push_tracking_web(data, ws_setter)
 
         if args.save and out_writer is None:
-            out_dir = "output/videos"
-            os.makedirs(out_dir, exist_ok=True)
-            out_name = f"arena_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            out_path = os.path.join(out_dir, out_name)
+            if getattr(args, "output", None):
+                out_path = args.output
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            else:
+                out_dir = "output/videos"
+                os.makedirs(out_dir, exist_ok=True)
+                out_name = f"arena_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                out_path = os.path.join(out_dir, out_name)
             fps = video_fps or config.TARGET_FPS
             h, w = frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -214,6 +218,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Beyblade X Arena tracker")
     parser.add_argument("-v", "--video", metavar="PATH", help="Use video file instead of webcam")
     parser.add_argument("-s", "--save", action="store_true", help="Save video output to output/videos/")
+    parser.add_argument("-o", "--output", metavar="PATH", help="Output video path (use with -s)")
     parser.add_argument("-d", "--debug", action="store_true", help="Show tracking overlay and tuning params")
     parser.add_argument("-e", "--effect", action="store_true", help="Enable trail SFX under each bey")
     parser.add_argument("-w", "--web", action="store_true", help="Broadcast tracking data via WebSocket")

@@ -14,6 +14,8 @@ The first demo shows the tracking output with the debug overlay enabled. The sec
 The core tracker broadcasts bey position, velocity and collision events to the sibling project `open_beybladex_ar_web` via WebSocket (`-w`). That project renders the SFX overlay and projection in the browser. The video below shows the output captured from the web client.
 ![Demo 2](demo/test_video_output.gif)
 
+[See more demo on YouTube](https://www.youtube.com/playlist?list=PLrNs8uiECbXatd9XZKk8QShOT4uTjQlCy)
+
 ## Requirements
 
 - Python 3.10 or higher
@@ -54,17 +56,23 @@ CLI arguments: `-v` video input, `-s` save output, `-d` debug, `-e` trail/impact
 
 Two one-shot scripts capture a frame and save mask images for inspection and tuning.
 
-#### Rail mask snapshot
+#### Rail mask
+
+The rail mask zeroes saturation in the green arena border region before Hough detection, so circles are only detected on the white floor and beyblades. The polygon (or auto-built annulus) defines the **excluded** area. Inside the polygon = tracking zone; outside = rail (masked out).
+
+![Rail mask](demo/rail_mask.png)
+
+*Rail mask example: white = excluded (green rail); black = tracking area*
+
+- **Define manually** with `-rm`: click 8–12 points along the inner edge of the rail, then `[c]` to confirm. Points saved to `RAIL_MASK_POINTS_FILE`.
+- **Preview**:
 
 ```bash
 python run_rail_mask_snapshot.py
 ```
 
-- Grabs one frame from the camera, builds the rail mask (green arena border), and saves it.
-- Output: `output/rail_mask.png` (white = excluded region).
-- Requires polygon points in `RAIL_MASK_POINTS_FILE` (from a prior `-rm` run) or falls back to auto-built rail mask from the first frame.
-- Opens the saved image on Linux/macOS.
-- Config: `RAIL_MASK_SAVE_PATH` (default: `output/rail_mask.png`).
+  Builds and saves the mask, opens it on Linux/macOS. Output: `output/rail_mask.png` (white = excluded region).
+- Config: `RAIL_MASK_SAVE_PATH`, `RAIL_MASK_POINTS_FILE`.
 
 #### Dome mask snapshot
 

@@ -10,3 +10,6 @@ __pycache__/
 videos/
 references/
 output/
+
+run_batch_yt_videos.sh
+run_rail_mask_with_bey.py
