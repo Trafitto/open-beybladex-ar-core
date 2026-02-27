@@ -48,7 +48,35 @@ python main.py
 
 - **Exit**: press `q` in the webcam window to close.
 
-CLI arguments: `-v` video input, `-s` save output, `-d` debug, `-e` trail/impact effects, `-w` WebSocket for `open_beybladex_ar_web` SFX projection.
+CLI arguments: `-v` video input, `-s` save output, `-d` debug, `-e` trail/impact effects, `-w` WebSocket for `open_beybladex_ar_web` SFX projection, `-rm` manually select rail mask polygon (click along inner edge of rail; points saved to `RAIL_MASK_POINTS_FILE` for reuse).
+
+### Mask preview tools
+
+Two one-shot scripts capture a frame and save mask images for inspection and tuning.
+
+#### Rail mask snapshot
+
+```bash
+python run_rail_mask_snapshot.py
+```
+
+- Grabs one frame from the camera, builds the rail mask (green arena border), and saves it.
+- Output: `output/rail_mask.png` (white = excluded region).
+- Requires polygon points in `RAIL_MASK_POINTS_FILE` (from a prior `-rm` run) or falls back to auto-built rail mask from the first frame.
+- Opens the saved image on Linux/macOS.
+- Config: `RAIL_MASK_SAVE_PATH` (default: `output/rail_mask.png`).
+
+#### Dome mask snapshot
+
+```bash
+python run_dome_mask_snapshot.py
+```
+
+- Grabs one frame from the camera, builds the dome exclusion mask (glare + optional wedge), and saves it.
+- Output: `output/dome_mask.png` (white = excluded) and `output/dome_mask_overlay.png` (frame with excluded regions tinted).
+- Masks specular reflections (config: `DOME_GLARE_V_MIN`, `DOME_GLARE_S_MAX`) and optionally the "Beyblade X" text region (config: `DOME_EXCLUDE_WEDGE_ENABLED`, `DOME_EXCLUDE_ANGLE_START`, `DOME_EXCLUDE_ANGLE_END`).
+- Opens the mask image on Linux/macOS.
+- Config: `DOME_MASK_SAVE_PATH` (default: `output/dome_mask.png`).
 
 During execution you will see:
 - Colored circles around detected beyblades (green and blue)
@@ -101,6 +129,8 @@ During execution you will see:
 | `physics.py`    | Velocity, collision and wall detection                              |
 | `utils.py`      | Position smoothing, Euclidean distance                               |
 | `config.py`     | Tunable parameters (camera, Hough, smoothing, colors, debug)         |
+| `run_rail_mask_snapshot.py` | One-shot: save rail mask for inspection |
+| `run_dome_mask_snapshot.py` | One-shot: save dome mask (glare + wedge) for inspection |
 | `tests/`        | Unit tests for preprocess, physics, web, utils                      |
 
 Run tests: `pytest tests/ -v`
@@ -121,10 +151,20 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 | **HOUGH_MIN_RADIUS / HOUGH_MAX_RADIUS** | Only larger circles detected | Only smaller circles detected; adjust to match bey size in pixels |
 | **HOUGH_MIN_DIST** | Fewer duplicate circles for same bey; may miss when 2 beys are close | More circles, risk of double-tracking one bey |
 | **ARENA_ROI** radius (3rd value) | Larger search area; includes stadium perimeter | Smaller area; focuses on white floor only |
-| **ARENA_ROI_HIGH / LOW** | Dual ROI: high (red, center) checked first; if 2 beys there, done | Set HIGH = None to use single ARENA_ROI |
+| **ARENA_ROI_HIGH** | Red circle, high-priority zone (center) | Set ARENA_ROI_LOW = None for red only |
+| **ARENA_ROI_LOW** | Green circle; set to None to disable | |
 | **PREFER_HIGH_PRIORITY** | When full, replace edge bey with unmatched center candidate | False = never replace |
 | **REJECT_HUE_RANGES** | Add more hue ranges to exclude (e.g. `[(35, 95)]` for green rail) | Fewer exclusions; set `[]` to disable (needed for green beys) |
 | **REJECT_NEAR_RIM_FRACTION** | Reject circles in outer X of arena; 0.10 = outer 10% (green rail zone) | 0 = disabled; lower = allow beys nearer rim |
+| **RAIL_MASK_ENABLED** | Zero S in green rail region before Hough (stadium is static) | False = no rail mask |
+| **RAIL_MASK_POINTS_FILE** | JSON file for polygon points; load when exists, recreate with `-rm` | `output/rail_mask_points.json` |
+| **POLYGON_EDGE_MARGIN** | Reject circles within N px of polygon edge (rail reflections); 0 = disabled | 18 |
+| **DOME_GLARE_ENABLED** | Zero S in specular spots (plastic dome reflections) before Hough | True |
+| **DOME_GLARE_V_MIN** | V above this = potential glare; lower = catch more | 200 |
+| **DOME_GLARE_S_MAX** | S below this in bright region = specular; higher = catch more | 55 |
+| **DOME_EXCLUDE_WEDGE_ENABLED** | Exclude angular wedge where "Beyblade X" text is (0=top, 90=right, 180=bottom) | False |
+| **DEBUG_HIDE_RED_CIRCLE_WHEN_POLYGON** | Cleaner overlay: hide red circle when polygon ROI is used | True |
+| **ZERO_VELOCITY_CLEAR_FRAMES** | Drop bey if speed < threshold for N frames (likely wrong object) | 0 = disabled |
 | **COLOR_SAT_MIN** | Stricter: only vivid chips accepted | More permissive: paler chips accepted, risk of white glare |
 | **COLOR_CENTER_MIN_FILL** | Stricter: more of center must be coloured | More permissive for small chips or motion blur |
 | **MATCH_MAX_DISTANCE** | Tracks faster motion; may wrong-match when beys cross | More stable identity; may lose track when bey moves fast |
@@ -145,9 +185,9 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 
 - **Bey1 and bey2 swap when they cross**: Raise `MATCH_IDENTITY_WEIGHT` (e.g. `8`–`12`), set `IDENTITY_HUE_MAX_DRIFT` (e.g. `35`) to reject bad matches, increase `IDENTITY_BOOTSTRAP_FRAMES` (e.g. `15`) for a stable identity.
 - **Tracker runs away when bey is briefly lost**: Set `KALMAN_MAX_VELOCITY_PX` (e.g. `60`–`100`) to reject extreme predictions and hold position until Hough re-acquires the circle.
-- **Tracking stadium rail instead of beys**: Set `REJECT_NEAR_RIM_FRACTION = 0.10` (rejects circles in outer 10%), lower `ARENA_ROI` radius, or add `REJECT_HUE_RANGES = [(35, 95)]` for green rail (only if not using green beys).
+- **Tracking stadium rail instead of beys**: Enable `RAIL_MASK_ENABLED = True` (zeros saturation in green rail), set `REJECT_NEAR_RIM_FRACTION = 0.10`, or add `REJECT_HUE_RANGES = [(35, 95)]` (only if not using green beys).
 - **Beys blur and disappear**: Lower `HOUGH_PARAM2` (e.g. `12`–`14`), raise `MATCH_MAX_DISTANCE` and `KALMAN_MAX_PREDICTION_DRIFT`.
-- **Tracker locks onto wrong objects**: Shrink `ARENA_ROI`, tune `REJECT_HUE_RANGES`, lower `MAX_RECOVERY_FRAMES` so it resets sooner.
+- **Tracker locks onto wrong objects**: Enable `RAIL_MASK_ENABLED`, set `ZERO_VELOCITY_CLEAR_FRAMES = 45` (drop stationary tracks), shrink `ARENA_ROI`, lower `MAX_RECOVERY_FRAMES`.
 - **Using green Beyblades**: Set `REJECT_HUE_RANGES = []` so green chips are not rejected.
 
 ## Web SFX Projection

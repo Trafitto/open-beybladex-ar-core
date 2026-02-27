@@ -12,12 +12,12 @@ TARGET_FPS = 60           # Target frame rate when using live camera
 
 # Hough Circle detection (runs every frame to find bey candidates)
 # HOUGH_DP: inverse ratio accumulator/image resolution (1.0-2.0 typical)
-# HOUGH_MIN_DIST: minimum px between circle centers; increase to reduce duplicates
+# HOUGH_MIN_DIST: minimum px between circle centers; lower = 2 beys when overlapping
 # HOUGH_PARAM1: Canny edge high threshold; HOUGH_PARAM2: accumulator threshold
 #   lower param2 = more detections but noisier; lower (~14-16) helps when beys blur
 # HOUGH_MIN_RADIUS, HOUGH_MAX_RADIUS: px range for bey circle size
 HOUGH_DP = 1.2
-HOUGH_MIN_DIST = 25
+HOUGH_MIN_DIST = 18
 HOUGH_PARAM1 = 80
 HOUGH_PARAM2 = 14
 HOUGH_MIN_RADIUS = 10
@@ -30,13 +30,14 @@ HOUGH_DETECTION_CHANNEL = "saturation"
 
 # Saturation channel tuning (only when HOUGH_DETECTION_CHANNEL == "saturation")
 # HOUGH_SAT_SCALE: multiply S channel (1.0 = no change); >1 boosts colored vs white
+#   Higher helps muted/dark beys stand out vs white floor; rail may clip at 255
 # HOUGH_SAT_FLOOR: clip values below this to 0 (suppress near-white noise, 0 = disabled)
-# HOUGH_SAT_CLAHE_ENABLED: apply CLAHE to S for uneven lighting across arena
+# HOUGH_SAT_CLAHE_ENABLED: apply CLAHE to S for uneven lighting; helps muted beys
 # HOUGH_SAT_CLAHE_CLIP: CLAHE clip limit when enabled (2-4 typical)
-HOUGH_SAT_SCALE = 1
-HOUGH_SAT_FLOOR = 5
-HOUGH_SAT_CLAHE_ENABLED = False
-HOUGH_SAT_CLAHE_CLIP = 2.5
+HOUGH_SAT_SCALE = 1.35
+HOUGH_SAT_FLOOR = 3
+HOUGH_SAT_CLAHE_ENABLED = True
+HOUGH_SAT_CLAHE_CLIP = 2.8
 
 # Preprocessing (Gaussian blur before Hough)
 # GAUSSIAN_BLUR_KSIZE: (width, height), odd numbers; larger = smoother
@@ -45,43 +46,49 @@ GAUSSIAN_BLUR_KSIZE = (9, 9)
 GAUSSIAN_BLUR_SIGMA = 2.0
 
 # HSV preprocessing -- CLAHE on V channel to equalize lighting before detection
+# Helps with dome shadows and uneven illumination
 # HSV_CLAHE_CLIP: higher = more contrast (2-4); HSV_CLAHE_TILE: (w, h) grid size
-# HSV_SAT_SCALE: multiply saturation (1.0 = no change); >1 can help dim lighting
+# HSV_SAT_SCALE: multiply saturation (1.0 = no change); >1 helps muted/dark beys
 HSV_PREPROCESS_ENABLED = True
 HSV_CLAHE_CLIP = 2.5
 HSV_CLAHE_TILE = (8, 8)
-HSV_SAT_SCALE = 1.15
+HSV_SAT_SCALE = 1.35
 
 # Arena ROI
 # ARENA_ROI: single ROI fallback; (center_x_frac, center_y_frac, radius_frac).
-# ARENA_ROI_HIGH: red, small, stadium center, high priority. Check first; if 2 beys found, done.
-# ARENA_ROI_LOW: green, larger, low priority. Searched when < 2 beys in HIGH.
-# Set ARENA_ROI_HIGH = None to disable dual-ROI and use ARENA_ROI only.
-# PREFER_HIGH_PRIORITY: when full, replace an edge bey with unmatched center candidate
+# ARENA_ROI_HIGH: red circle, high-priority zone (center). Prefer tracking here.
+# ARENA_ROI_LOW: set to None for red circle only (no green)
+# PREFER_HIGH_PRIORITY: prefer candidates in red zone when matching
 ARENA_ROI = (0.5, 0.52, 0.60)
 PREFER_HIGH_PRIORITY = True
-ARENA_ROI_HIGH = (0.5, 0.40, 0.40)
-ARENA_ROI_LOW = (0.5, 0.52, 0.60)
+ARENA_ROI_HIGH = (0.5, 0.40, 0.35)
+ARENA_ROI_LOW = None
 ARENA_REFERENCE_DIR = "references/arena"
 ARENA_RIM_SHRINK = 0.70
 ARENA_ROI_OFFSET_X = 0
 ARENA_ROI_OFFSET_Y = 0
 
 # Tracking
-# MAX_BEY_COUNT: max beys to track (2 = 1v1); discovery stops when reached
+# MAX_BEY_COUNT: max beys to track (2 = both in arena)
 # MAX_RECOVERY_FRAMES: drop bey if not seen for this many frames
-# BOOTSTRAP_MIN_SPEED: px/frame; below this a bey is "stationary"
-# MAX_STUCK_FRAMES: if all beys stationary for this long, clear and rescan
 MAX_BEY_COUNT = 2
-MAX_RECOVERY_FRAMES = 25
+MAX_RECOVERY_FRAMES = 20
 BOOTSTRAP_MIN_SPEED = 8.0
-MAX_STUCK_FRAMES = 20
+MAX_STUCK_FRAMES = 10
+
+# Zero velocity = wrong object (e.g. tracking static green rail)
+# Drop bey if speed < threshold for this many consecutive frames (0 = disabled)
+ZERO_VELOCITY_CLEAR_FRAMES = 30
+ZERO_VELOCITY_THRESHOLD = 4.0
 
 # Position smoothing (1 = no smoothing; higher = smoother but laggier)
 SMOOTH_WINDOW_SIZE = 1
 
 # Scale detected circle radius for display
 BEY_RADIUS_SCALE = 1.4
+# Beyblade identification: custom labels per slot (first bey=0, second=1)
+# Empty or ["", ""] = use color name from hue (Red, Blue, etc.)
+BEY_IDENTITIES = ["Blader 1", "Blader 2"]   # e.g. ["Player 1", "Player 2"] or ["Dragon", "Phoenix"]
 # Collision: margin extended from each bey circle; overlap of two zones = impact
 # Minimum 1px used when 0. With -d, gray=circle, magenta=zone.
 BEY_COLLISION_MARGIN_PX = 10
@@ -90,19 +97,50 @@ BEY_COLLISION_MARGIN_PX = 10
 # COLOR_SAMPLE_RADIUS_FRAC: fraction of circle radius to sample at center
 # COLOR_SAT_MIN: minimum saturation (rejects white); lower = accept paler chips
 # COLOR_CENTER_MIN_FILL: minimum fraction of center that must be saturated
-# COLOR_MIN_HUE_SEPARATION: hue difference from rim to accept (rim rejection)
+# COLOR_MIN_HUE_SEPARATION: reject circles whose center hue is within this of rail hue
 # REJECT_HUE_RANGES: [(lo, hi), ...] in OpenCV hue 0-180; exclude stadium elements (e.g. green rail)
 # COLOR_HUE_TOLERANCE: max hue drift when adapting tracked color
 # COLOR_ADAPT_RATE: blend rate toward observed hue (0 = no adaptation)
 COLOR_SAMPLE_RADIUS_FRAC = 0.45
-COLOR_SAT_MIN = 40
-COLOR_VAL_MIN = 40
-COLOR_CENTER_MIN_FILL = 0.10
+COLOR_SAT_MIN = 32
+COLOR_VAL_MIN = 35
+COLOR_CENTER_MIN_FILL = 0.08
 COLOR_MIN_HUE_SEPARATION = 10
 REJECT_HUE_RANGES = []   # Beyblade X stadium green X-rail; set [] if using green beys
 # REJECT_NEAR_RIM_FRACTION: reject circles in outer X of arena (0 = disabled)
-# Green rail sits at the rim; 0.08-0.12 rejects rail false positives, allows edge beys
-REJECT_NEAR_RIM_FRACTION = 0.10
+# Green rail sits at the rim; 0.12-0.15 rejects rail false positives
+REJECT_NEAR_RIM_FRACTION = 0.15
+
+# Rail mask: reduce saturation in green rail region before Hough (stadium is static)
+# RAIL_MASK_ENABLED: build mask from first frame, zero out S in rail area
+# RAIL_MASK_HUE_LO/HI: hue range for green rail (OpenCV 0-180); 35-95 typical
+# RAIL_MASK_SAT_MIN: min saturation to count as rail
+# RAIL_MASK_ANNULUS_INNER: inner radius frac (0.80 = outer 20%, narrower band)
+# RAIL_MASK_OUTER_SCALE: extend beyond arena (1.05 = barely past rim)
+RAIL_MASK_ENABLED = True
+RAIL_MASK_HUE_LO = 30
+RAIL_MASK_HUE_HI = 100
+RAIL_MASK_SAT_MIN = 45
+RAIL_MASK_ANNULUS_INNER = 0.70
+RAIL_MASK_OUTER_SCALE = 0.75
+RAIL_MASK_SAVE_PATH = ""   # e.g. "output/rail_mask.png" to save mask for inspection
+# RAIL_MASK_POINTS_FILE: save/load polygon points (tracking area); used when -rm or file missing
+RAIL_MASK_POINTS_FILE = "output/rail_mask_points.json"
+# POLYGON_EDGE_MARGIN: reject circles within this many px of polygon edge (0 = disabled)
+POLYGON_EDGE_MARGIN = 18
+
+# Plastic dome cover: reduces glare/specular reflections and optional text-region exclude
+# DOME_GLARE: zero S in bright specular spots (high V, low S) before Hough
+DOME_GLARE_ENABLED = True
+DOME_GLARE_V_MIN = 200    # V above this = potential glare (lower = catch more)
+DOME_GLARE_S_MAX = 55     # if S below this in bright region, treat as specular
+# DOME_EXCLUDE_WEDGE: optional wedge (degrees) to exclude where "Beyblade X" text is
+# Angles from top (0), clockwise: 90=right, 180=bottom, 270=left. Set to (-1,-1) to disable
+DOME_EXCLUDE_WEDGE_ENABLED = False
+DOME_EXCLUDE_ANGLE_START = 135   # e.g. exclude bottom-left quadrant
+DOME_EXCLUDE_ANGLE_END = 225
+# DOME_MASK_SAVE_PATH: save path for run_dome_mask_snapshot.py (e.g. output/dome_mask.png)
+DOME_MASK_SAVE_PATH = "output/dome_mask.png"
 
 COLOR_HUE_TOLERANCE = 22
 COLOR_ADAPT_RATE = 0.05
@@ -121,6 +159,8 @@ IDENTITY_BOOTSTRAP_FRAMES = 15
 # New bey discovery
 # DISCOVERY_MIN_SEPARATION: min px from any tracked bey to register new one
 DISCOVERY_MIN_SEPARATION = 35
+# CANDIDATE_MIN_SEPARATION: two Hough circles closer than this are same object; keep one
+CANDIDATE_MIN_SEPARATION = 28
 
 # Kalman filter
 # KALMAN_PROCESS_NOISE: higher = trust Hough detections more than prediction
@@ -159,6 +199,7 @@ COLLISION_VELOCITY_REVERSAL_COS = 0.5
 
 # Debug
 DEBUG_PRINT = False   # True = print collision/recovery events to console
+DEBUG_HIDE_RED_CIRCLE_WHEN_POLYGON = False  # Keep red circle visible (high-priority zone)
 
 # Overlay colors (BGR)
 COLOR_BEY_1 = (0, 255, 0)

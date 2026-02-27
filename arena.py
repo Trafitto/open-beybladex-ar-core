@@ -56,6 +56,14 @@ def setup_arena_roi(
         )
         return
 
+    if roi_high_cfg is not None and roi_low_cfg is None:
+        cx = int(roi_high_cfg[0] * fw)
+        cy = int(roi_high_cfg[1] * fh)
+        r = int(roi_high_cfg[2] * min_dim)
+        tracker.set_arena_roi_high_only(cx, cy, r)
+        print(f"Arena ROI high only (red): center=({cx},{cy}) r={r}")
+        return
+
     if arena_roi_cfg is not None:
         roi_cx = int(arena_roi_cfg[0] * fw)
         roi_cy = int(arena_roi_cfg[1] * fh)

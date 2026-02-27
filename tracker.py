@@ -9,6 +9,7 @@ Every frame:
     5. Unmatched circles that show local motion (frame differencing) and have
        a unique colour become new tracked beys.
 """
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -338,6 +339,9 @@ class BeyTracker:
         self._rim_hue: float = -1.0
         self._prev_gray: Optional[np.ndarray] = None
         self._identity_bootstrap: Dict[int, List[float]] = {}
+        self._rail_mask: Optional[np.ndarray] = None
+        self._polygon_points: Optional[List[Tuple[int, int]]] = None
+        self._rail_hue_learned: bool = False
 
     # ------------------------------------------------------------------ #
     #  Arena ROI                                                          #
@@ -364,6 +368,15 @@ class BeyTracker:
         self._arena_roi_high = (cxi, cyi, r_high)
         self._arena_roi_low = (cxi, cyi, r_low)
 
+    def set_arena_roi_high_only(self, cx: int, cy: int, r: int) -> None:
+        """Red circle only; no green. Use polygon for full area when set."""
+        ox = int(getattr(config, "ARENA_ROI_OFFSET_X", 0))
+        oy = int(getattr(config, "ARENA_ROI_OFFSET_Y", 0))
+        cxi, cyi = int(cx) + ox, int(cy) + oy
+        self._arena_roi = (cxi, cyi, r)
+        self._arena_roi_high = (cxi, cyi, r)
+        self._arena_roi_low = None
+
     def get_arena_roi(self) -> Optional[Tuple[int, int, int]]:
         return self._arena_roi
 
@@ -377,6 +390,9 @@ class BeyTracker:
         return self._rim_circle
 
     def _inside_roi(self, x: float, y: float) -> bool:
+        if self._polygon_points is not None:
+            pts = np.array(self._polygon_points, dtype=np.int32)
+            return cv2.pointPolygonTest(pts, (float(x), float(y)), False) >= 0
         roi = self._arena_roi_low if self._arena_roi_low else self._arena_roi
         if roi is None:
             return True
@@ -389,8 +405,21 @@ class BeyTracker:
         rcx, rcy, rr = self._arena_roi_high
         return distance((x, y), (rcx, rcy)) <= rr
 
+    def _near_polygon_edge(self, x: float, y: float) -> bool:
+        """True if (x,y) is inside polygon but within margin px of the edge (rail reflections)."""
+        if self._polygon_points is None:
+            return False
+        margin = float(getattr(config, "POLYGON_EDGE_MARGIN", 0))
+        if margin <= 0:
+            return False
+        pts = np.array(self._polygon_points, dtype=np.int32)
+        dist = cv2.pointPolygonTest(pts, (float(x), float(y)), True)
+        return 0 < dist < margin
+
     def _near_rim(self, x: float, y: float) -> bool:
         """True if (x,y) is in the outer band where the green rail sits."""
+        if self._polygon_points is not None:
+            return False
         frac = float(getattr(config, "REJECT_NEAR_RIM_FRACTION", 0))
         if frac <= 0:
             return False
@@ -400,6 +429,82 @@ class BeyTracker:
         rcx, rcy, rr = stadium
         d = distance((x, y), (rcx, rcy))
         return d >= rr * (1.0 - frac)
+
+    def build_rail_mask(self, frame: np.ndarray) -> bool:
+        """Build mask of green rail region from frame. Stadium is static. Returns True if built."""
+        if not getattr(config, "RAIL_MASK_ENABLED", False):
+            return False
+        stadium = self._rim_circle or self._arena_roi_low or self._arena_roi
+        if stadium is None:
+            return False
+        rcx, rcy, rr = stadium
+        h, w = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        H, S = hsv[:, :, 0], hsv[:, :, 1]
+        h_lo = int(getattr(config, "RAIL_MASK_HUE_LO", 35))
+        h_hi = int(getattr(config, "RAIL_MASK_HUE_HI", 95))
+        sat_min = int(getattr(config, "RAIL_MASK_SAT_MIN", 55))
+        inner_frac = float(getattr(config, "RAIL_MASK_ANNULUS_INNER", 0.75))
+        outer_scale = float(getattr(config, "RAIL_MASK_OUTER_SCALE", 1.05))
+        inner_r = int(rr * inner_frac)
+        outer_r = int(rr * outer_scale)
+        Y, X = np.ogrid[:h, :w]
+        dist = np.sqrt((X - rcx) ** 2 + (Y - rcy) ** 2)
+        annulus = (dist >= inner_r) & (dist <= outer_r)
+        if h_lo <= h_hi:
+            h_mask = (H >= h_lo) & (H <= h_hi)
+        else:
+            h_mask = (H >= h_lo) | (H <= h_hi)
+        rail = (annulus & h_mask & (S >= sat_min)).astype(np.uint8) * 255
+        kernel = np.ones((5, 5), np.uint8)
+        rail = cv2.morphologyEx(rail, cv2.MORPH_CLOSE, kernel)
+        rail = cv2.morphologyEx(rail, cv2.MORPH_OPEN, kernel)
+        if np.sum(rail > 0) < 100:
+            return False
+        self._rail_mask = rail
+        save_path = getattr(config, "RAIL_MASK_SAVE_PATH", "")
+        if save_path:
+            parent = os.path.dirname(save_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if cv2.imwrite(save_path, rail):
+                print(f"Rail mask saved to {save_path}")
+        return True
+
+    def get_rail_mask(self) -> Optional[np.ndarray]:
+        """Return the rail mask if built (for debug overlay)."""
+        return self._rail_mask
+
+    def set_rail_mask_from_polygon(
+        self,
+        frame_shape: Tuple[int, ...],
+        points: List[Tuple[int, int]],
+        *,
+        save_path: str = "",
+    ) -> bool:
+        """
+        Set rail mask and tracking ROI from polygon points.
+        Polygon = tracking area (inside = where beys are). Rail mask = outside polygon (zero S there).
+        """
+        if len(points) < 3:
+            return False
+        h, w = frame_shape[:2]
+        self._polygon_points = list(points)
+        play_area = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array(points, dtype=np.int32)
+        cv2.fillPoly(play_area, [pts], 255)
+        self._rail_mask = np.where(play_area > 0, 0, 255).astype(np.uint8)
+        if save_path:
+            parent = os.path.dirname(save_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if cv2.imwrite(save_path, self._rail_mask):
+                print(f"Rail mask saved to {save_path}")
+        return True
+
+    def get_polygon_points(self) -> Optional[List[Tuple[int, int]]]:
+        """Return polygon points if set (for debug overlay)."""
+        return self._polygon_points
 
     def auto_detect_roi_from_reference(
         self, reference: np.ndarray, frame: np.ndarray
@@ -719,6 +824,9 @@ class BeyTracker:
                 if max_drift > 0 and identity_hue >= 0 and hd > max_drift:
                     continue
                 score = d + hd * identity_w
+                if getattr(config, "PREFER_HIGH_PRIORITY", False) and self._arena_roi_high:
+                    if self._inside_roi_high(cx, cy):
+                        score -= 150
                 pairs.append((score, bi, ci))
 
         pairs.sort()
@@ -757,6 +865,62 @@ class BeyTracker:
                 return
         bey.color_hue = candidate
 
+    def _build_dome_mask(
+        self, hsv: np.ndarray, s_channel: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """Build dome exclusion mask (glare + wedge). Returns uint8 255=excluded, or None."""
+        h, w = hsv.shape[:2]
+        out = np.zeros((h, w), dtype=np.uint8)
+        any_mask = False
+        if getattr(config, "DOME_GLARE_ENABLED", False):
+            v = hsv[:, :, 2]
+            s = s_channel
+            v_min = int(getattr(config, "DOME_GLARE_V_MIN", 220))
+            s_max = int(getattr(config, "DOME_GLARE_S_MAX", 40))
+            glare = ((v >= v_min) & (s < s_max)).astype(np.uint8) * 255
+            out = np.maximum(out, glare)
+            any_mask = any_mask or np.any(glare > 0)
+        if getattr(config, "DOME_EXCLUDE_WEDGE_ENABLED", False):
+            start_deg = float(getattr(config, "DOME_EXCLUDE_ANGLE_START", -1))
+            end_deg = float(getattr(config, "DOME_EXCLUDE_ANGLE_END", -1))
+            if start_deg >= 0 and end_deg >= 0:
+                center = self._rim_circle or self._arena_roi_high or self._arena_roi
+                if center is not None:
+                    cx_roi, cy_roi, _ = center
+                    Y, X = np.ogrid[:h, :w]
+                    dy = Y.astype(np.float32) - cy_roi
+                    dx = X.astype(np.float32) - cx_roi
+                    angle_deg = (np.degrees(np.arctan2(dx, -dy)) + 360) % 360
+                    if start_deg <= end_deg:
+                        wedge = (angle_deg >= start_deg) & (angle_deg <= end_deg)
+                    else:
+                        wedge = (angle_deg >= start_deg) | (angle_deg <= end_deg)
+                    wedge_u8 = wedge.astype(np.uint8) * 255
+                    out = np.maximum(out, wedge_u8)
+                    any_mask = True
+        if not any_mask and (getattr(config, "DOME_GLARE_ENABLED", False) or getattr(config, "DOME_EXCLUDE_WEDGE_ENABLED", False)):
+            return out
+        return out if any_mask else None
+
+    def get_dome_mask(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """Build dome exclusion mask for snapshot/preview. Returns uint8 255=excluded."""
+        if getattr(config, "HOUGH_DETECTION_CHANNEL", "grayscale") != "saturation":
+            return None
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1].astype(np.float32)
+        s *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
+        s = np.clip(s, 0, 255).astype(np.uint8)
+        floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
+        if floor > 0:
+            s = np.where(s >= floor, s, 0).astype(np.uint8)
+        if getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False):
+            clahe = cv2.createCLAHE(
+                clipLimit=float(getattr(config, "HOUGH_SAT_CLAHE_CLIP", 2.5)),
+                tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
+            )
+            s = clahe.apply(s)
+        return self._build_dome_mask(hsv, s)
+
     # ------------------------------------------------------------------ #
     #  Main update                                                         #
     # ------------------------------------------------------------------ #
@@ -779,9 +943,30 @@ class BeyTracker:
                     tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
                 )
                 s = clahe.apply(s)
+            if self._rail_mask is not None:
+                s[self._rail_mask > 0] = 0
+            dome_mask = self._build_dome_mask(hsv, s)
+            if dome_mask is not None:
+                s[dome_mask > 0] = 0
             channel = s
         else:
             channel = gray
+
+        if (
+            self._rail_mask is not None
+            and self._polygon_points is not None
+            and not self._rail_hue_learned
+            and self._rim_hue < 0
+        ):
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            H = hsv[:, :, 0][self._rail_mask > 0]
+            S = hsv[:, :, 1][self._rail_mask > 0]
+            sat_ok = S >= 50
+            if np.sum(sat_ok) > 30:
+                self._rim_hue = float(np.median(H[sat_ok]))
+                self._rail_hue_learned = True
+                if config.DEBUG_PRINT:
+                    print(f"Learned rail hue from polygon: {self._rim_hue:.0f}")
 
         # --- 1. Hough circles ---
         circles = self._detect_circles_hough(channel, frame.shape)
@@ -800,7 +985,22 @@ class BeyTracker:
                 continue
             if self._near_rim(cx, cy):
                 continue
+            if self._near_polygon_edge(cx, cy):
+                continue
             all_candidates.append((float(cx), float(cy), float(r), hue))
+
+        # Deduplicate: overlapping circles = same physical bey, keep one
+        min_sep = getattr(config, "CANDIDATE_MIN_SEPARATION", 28)
+        deduped: List[Tuple[float, float, float, float]] = []
+        for c in all_candidates:
+            cx, cy, r, hue = c
+            overlaps = any(
+                distance((cx, cy), (ox, oy)) < max(min_sep, r + or_)
+                for ox, oy, or_, _ in deduped
+            )
+            if not overlaps:
+                deduped.append(c)
+        all_candidates = deduped
 
         if self._arena_roi_high is not None:
             high = [c for c in all_candidates if self._inside_roi_high(c[0], c[1])]
@@ -892,10 +1092,12 @@ class BeyTracker:
                     )
 
         # --- 6a. Prefer high-priority: replace edge bey with unmatched center candidate ---
+        # Skip when single-bey: if already tracking one, do not switch to another circle.
         if (
             getattr(config, "PREFER_HIGH_PRIORITY", False)
             and self._arena_roi_high is not None
             and len(self._bey) == config.MAX_BEY_COUNT
+            and config.MAX_BEY_COUNT > 1
         ):
             hcx, hcy, hr = self._arena_roi_high
             high_unmatched = [
@@ -958,12 +1160,75 @@ class BeyTracker:
                         b._kalman.statePost[2] = np.float32(vx)
                         b._kalman.statePost[3] = np.float32(vy)
 
-        # --- 7. Drop beys lost for too long ---
+        # --- 6c. Merge tracked beys that overlap (2 circles on same physical bey) ---
+        if len(self._bey) >= 2:
+            merge_thresh = getattr(config, "CANDIDATE_MIN_SEPARATION", 28)
+            to_drop: set = set()
+            for i, b1 in enumerate(self._bey):
+                if b1.id in to_drop:
+                    continue
+                for j, b2 in enumerate(self._bey):
+                    if i >= j or b2.id in to_drop:
+                        continue
+                    d = distance(b1.position, b2.position)
+                    if d < max(merge_thresh, b1.radius + b2.radius):
+                        in1 = self._arena_roi_high and self._inside_roi_high(b1.position[0], b1.position[1])
+                        in2 = self._arena_roi_high and self._inside_roi_high(b2.position[0], b2.position[1])
+                        keep = b1 if (b1.frames_since_seen, 0 if in1 else 1) <= (b2.frames_since_seen, 0 if in2 else 1) else b2
+                        to_drop.add(b2.id if keep is b1 else b1.id)
+            for bid in to_drop:
+                self._identity_bootstrap.pop(bid, None)
+            self._bey = [b for b in self._bey if b.id not in to_drop]
+
+        # --- 6d. Enforce MAX_BEY_COUNT: drop excess if ever over limit ---
+        if len(self._bey) > config.MAX_BEY_COUNT:
+            self._bey.sort(
+                key=lambda b: (
+                    b.frames_since_seen,
+                    0 if self._arena_roi_high and self._inside_roi_high(b.position[0], b.position[1]) else 1,
+                )
+            )
+            for b in self._bey[config.MAX_BEY_COUNT :]:
+                self._identity_bootstrap.pop(b.id, None)
+            self._bey = self._bey[: config.MAX_BEY_COUNT]
+
+        # --- 7. Drop beys lost, stationary, or outside polygon ---
         max_drop = getattr(config, "MAX_RECOVERY_FRAMES", 20)
-        dropped_ids = {b.id for b in self._bey if b.frames_since_seen >= max_drop}
+        overlap_dist = float(getattr(config, "OVERLAP_RECOVERY_DISTANCE", 0))
+        zero_vel_frames = int(getattr(config, "ZERO_VELOCITY_CLEAR_FRAMES", 0))
+        zero_vel_thresh = float(getattr(config, "ZERO_VELOCITY_THRESHOLD", 3.0))
+        matched_ids = set(matched.keys())
+        dropped_ids = set()
+        for b in self._bey:
+            if self._polygon_points is not None and not self._inside_roi(b.position[0], b.position[1]):
+                dropped_ids.add(b.id)
+                if config.DEBUG_PRINT:
+                    print(f"Dropped bey#{b.id}: outside polygon (stuck on rail)")
+            elif b.frames_since_seen >= max_drop:
+                if overlap_dist > 0 and b.id not in matched_ids:
+                    near_matched = any(
+                        b2.id in matched_ids
+                        and distance(b.position, b2.position) < overlap_dist
+                        for b2 in self._bey
+                        if b2.id != b.id
+                    )
+                    if near_matched:
+                        continue
+                dropped_ids.add(b.id)
+            elif (
+                zero_vel_frames > 0
+                and b.frames_stationary >= zero_vel_frames
+                and b.speed < zero_vel_thresh
+            ):
+                dropped_ids.add(b.id)
+                if config.DEBUG_PRINT:
+                    print(
+                        f"Dropped bey#{b.id}: zero velocity for {b.frames_stationary} frames "
+                        f"(likely wrong object)"
+                    )
         for bid in dropped_ids:
             self._identity_bootstrap.pop(bid, None)
-        self._bey = [b for b in self._bey if b.frames_since_seen < max_drop]
+        self._bey = [b for b in self._bey if b.id not in dropped_ids]
 
         if not self._bey:
             self._bootstrapped = False
