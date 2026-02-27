@@ -1,9 +1,11 @@
 """
 Main overlay: bey circles, velocity arrows, IMPACT label.
 """
-from typing import Any
+from typing import Any, List, Optional
 
 import cv2
+
+from utils import get_bey_label
 
 
 def draw_overlay(
@@ -18,11 +20,13 @@ def draw_overlay(
     impact_color: tuple[int, int, int] = (0, 0, 255),
     font_scale: float = 0.6,
     font_thickness: int = 2,
+    bey_identities: Optional[List[str]] = None,
 ) -> None:
-    """Draw bey circles, velocity arrows, optional IMPACT label."""
+    """Draw bey circles, velocity arrows, identity labels, optional IMPACT label."""
     if colors is None:
         colors = [(0, 255, 0), (255, 0, 0)]
-    for b in states:
+    sorted_states = sorted(states, key=lambda b: b.id)
+    for slot, b in enumerate(sorted_states):
         color = colors[b.id % 2]
         cx, cy = int(b.position[0]), int(b.position[1])
         r = int(b.radius * radius_scale)
@@ -32,7 +36,8 @@ def draw_overlay(
         scale = 0.1
         end = (int(cx + vx * scale), int(cy + vy * scale))
         cv2.arrowedLine(frame, (cx, cy), end, velocity_color, 2)
-        label = f"#{b.id} {b.speed:.0f}"
+        identity = get_bey_label(b, slot, bey_identities)
+        label = f"{identity} {b.speed:.0f}"
         cv2.putText(
             frame,
             label,
@@ -77,4 +82,5 @@ def draw_overlay_from_config(
         impact_color=getattr(cfg, "COLOR_IMPACT", (0, 0, 255)),
         font_scale=getattr(cfg, "FONT_SCALE", 0.6),
         font_thickness=getattr(cfg, "FONT_THICKNESS", 2),
+        bey_identities=getattr(cfg, "BEY_IDENTITIES", None),
     )

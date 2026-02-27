@@ -5,7 +5,7 @@ import asyncio
 import json
 import sys
 import threading
-from typing import Callable
+from typing import Callable, Optional
 
 
 def build_tracking_data(
@@ -17,19 +17,25 @@ def build_tracking_data(
     wall_hits: list[int] | None = None,
     collision_count: int = 0,
     radius_scale: float = 1.4,
+    identities: Optional[list[str]] = None,
 ) -> dict:
     """
     Build JSON-serializable tracking payload for WebSocket clients.
 
     Pure function: no side effects, easy to unit test.
+    Web expects id 0/1 for trail slots; use slot index as id.
     """
     beys = []
-    for b in states:
+    sorted_states = sorted(states, key=lambda b: b.id)
+    id_list = identities or []
+    for slot, b in enumerate(sorted_states):
         x, y = b.position[0], b.position[1]
         nx = x / frame_w if frame_w > 0 else 0
         ny = y / frame_h if frame_h > 0 else 0
+        identity = id_list[slot] if slot < len(id_list) else ""
         beys.append({
-            "id": b.id,
+            "id": slot,
+            "identity": identity,
             "x": round(x, 2),
             "y": round(y, 2),
             "nx": round(nx, 4),

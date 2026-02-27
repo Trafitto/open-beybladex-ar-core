@@ -18,6 +18,14 @@ import cv2
 import config
 from arena import setup_arena_roi
 from overlay.debug import draw_debug_overlay_from_config
+from roi import (
+    load_rail_mask_points,
+    load_red_zone,
+    save_rail_mask_points,
+    save_red_zone,
+    select_rail_mask_points,
+    select_red_zone,
+)
 from overlay.effects import (
     draw_impact_effect_from_config,
     draw_impact_label_from_config,
@@ -28,6 +36,7 @@ from overlay.overlay import draw_overlay_from_config
 from physics import CollisionDetector, detect_wall_collisions
 from preprocess import preprocess_frame_hsv_from_config
 from tracker import BeyTracker
+from utils import get_bey_label
 from web import build_tracking_data, push_tracking_web, run_websocket_server
 
 
@@ -144,18 +153,28 @@ def _run_main_loop(
 
         if args.web and ws_setter:
             h, w = frame.shape[:2]
+            sorted_states = sorted(states, key=lambda b: b.id)
+            identities = [
+                get_bey_label(b, i, getattr(config, "BEY_IDENTITIES", None))
+                for i, b in enumerate(sorted_states)
+            ]
             data = build_tracking_data(
                 w, h, states, collision, impact_center, wall_hits,
                 collision_detector.event_count,
                 radius_scale=config.BEY_RADIUS_SCALE,
+                identities=identities,
             )
             push_tracking_web(data, ws_setter)
 
         if args.save and out_writer is None:
-            out_dir = "output/videos"
-            os.makedirs(out_dir, exist_ok=True)
-            out_name = f"arena_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            out_path = os.path.join(out_dir, out_name)
+            if getattr(args, "output", None):
+                out_path = args.output
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            else:
+                out_dir = "output/videos"
+                os.makedirs(out_dir, exist_ok=True)
+                out_name = f"arena_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                out_path = os.path.join(out_dir, out_name)
             fps = video_fps or config.TARGET_FPS
             h, w = frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -199,10 +218,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Beyblade X Arena tracker")
     parser.add_argument("-v", "--video", metavar="PATH", help="Use video file instead of webcam")
     parser.add_argument("-s", "--save", action="store_true", help="Save video output to output/videos/")
+    parser.add_argument("-o", "--output", metavar="PATH", help="Output video path (use with -s)")
     parser.add_argument("-d", "--debug", action="store_true", help="Show tracking overlay and tuning params")
     parser.add_argument("-e", "--effect", action="store_true", help="Enable trail SFX under each bey")
     parser.add_argument("-w", "--web", action="store_true", help="Broadcast tracking data via WebSocket")
     parser.add_argument("-a", "--arena", action="store_true", help="Manually select the arena ROI on the first frame")
+    parser.add_argument(
+        "-rm", "--rail-mask",
+        action="store_true",
+        help="Manually select rail mask: click points along the green rail (8-12 pts), then [c]"
+    )
+    parser.add_argument(
+        "-rz", "--red-zone",
+        action="store_true",
+        help="Manually select red zone: click center, then edge of circle, then [c]"
+    )
     args = parser.parse_args()
 
     if args.video:
@@ -230,6 +260,44 @@ def main() -> None:
 
     first_frame = preprocess_frame_hsv_from_config(first_frame, config)
     setup_arena_roi(tracker, first_frame, manual=args.arena)
+
+    red_zone_file = getattr(config, "RED_ZONE_POINTS_FILE", "output/red_zone.json")
+    if args.red_zone:
+        red_zone = select_red_zone(first_frame)
+        if red_zone:
+            cx, cy, r = red_zone
+            save_red_zone(red_zone_file, cx, cy, r, frame_shape=first_frame.shape)
+            tracker.set_arena_roi_high_only(cx, cy, r)
+            print(f"Red zone saved: center=({cx},{cy}) r={r}")
+        else:
+            print("Red zone selection cancelled")
+    else:
+        red_zone = load_red_zone(red_zone_file, frame_shape=first_frame.shape)
+        if red_zone:
+            cx, cy, r = red_zone
+            tracker.set_arena_roi_high_only(cx, cy, r)
+            print(f"Red zone loaded: center=({cx},{cy}) r={r}")
+
+    points_file = getattr(config, "RAIL_MASK_POINTS_FILE", "output/rail_mask_points.json")
+    if args.rail_mask:
+        points = select_rail_mask_points(first_frame)
+        if points:
+            save_rail_mask_points(points_file, points, frame_shape=first_frame.shape)
+            mask_path = getattr(config, "RAIL_MASK_SAVE_PATH", "") or "output/rail_mask.png"
+            if tracker.set_rail_mask_from_polygon(first_frame.shape, points, save_path=mask_path):
+                print("Rail mask set from polygon (tracking area = inside)")
+        else:
+            print("Rail mask selection cancelled or too few points")
+    else:
+        points = load_rail_mask_points(points_file, frame_shape=first_frame.shape)
+        if points:
+            tracker.set_rail_mask_from_polygon(first_frame.shape, points)
+            print("Rail mask loaded from", points_file)
+        elif getattr(config, "RAIL_MASK_ENABLED", False):
+            if tracker.build_rail_mask(first_frame):
+                print("Rail mask built from first frame (green rail region masked)")
+            else:
+                print("Rail mask build failed; run with -rm to define polygon")
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 

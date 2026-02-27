@@ -6,6 +6,9 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+import config
+from utils import get_bey_label
+
 
 class TrackerLike(Protocol):
     def get_states(self): ...
@@ -15,6 +18,8 @@ class TrackerLike(Protocol):
     def get_arena_roi_high(self): ...
     def get_arena_roi(self): ...
     def get_rim_circle(self): ...
+    def get_rail_mask(self): ...
+    def get_polygon_points(self): ...
     def get_debug_masks(self, frame: np.ndarray): ...
 
 
@@ -49,9 +54,12 @@ def draw_debug_overlay(
         f"collisions: {collision_detector.event_count}",
         f"collision margin: {margin}px (magenta=zone, gray=bey)",
     ]
-    for b in tracker.get_states():
+    sorted_states = sorted(tracker.get_states(), key=lambda b: b.id)
+    identities = getattr(config, "BEY_IDENTITIES", None) or []
+    for slot, b in enumerate(sorted_states):
+        identity = get_bey_label(b, slot, identities)
         hue_label = f"hue={b.color_hue:.0f}" if b.color_hue >= 0 else "hue=?"
-        lines.append(f"  bey#{b.id} {hue_label} unseen={b.frames_since_seen}")
+        lines.append(f"  {identity} (bey#{b.id}) {hue_label} unseen={b.frames_since_seen}")
 
     y_pos = 24
     for line in lines:
@@ -61,9 +69,10 @@ def draw_debug_overlay(
 
     swatch_x = 8
     overlay_colors = [color_bey_1, color_bey_2]
-    for b in tracker.get_states():
+    for slot, b in enumerate(sorted_states):
         if b.color_hue < 0:
             continue
+        identity = get_bey_label(b, slot, identities)
         swatch_hsv = np.array([[[int(b.color_hue), 255, 255]]], dtype=np.uint8)
         swatch_bgr = cv2.cvtColor(swatch_hsv, cv2.COLOR_HSV2BGR)
         sc = tuple(int(v) for v in swatch_bgr[0, 0])
@@ -71,7 +80,7 @@ def draw_debug_overlay(
         cv2.rectangle(frame, (swatch_x, y_pos), (swatch_x + 14, y_pos + 14), (255, 255, 255), 1)
         cv2.putText(
             frame,
-            f"bey#{b.id}",
+            identity,
             (swatch_x + 20, y_pos + 12),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
@@ -80,19 +89,29 @@ def draw_debug_overlay(
         )
         swatch_x += 80
 
+    polygon = tracker.get_polygon_points()
+    if polygon:
+        pts = np.array(polygon, dtype=np.int32)
+        cv2.polylines(frame, [pts], True, (0, 255, 0), 1)
     roi_low = tracker.get_arena_roi_low()
     roi_high = tracker.get_arena_roi_high()
     if roi_low:
         cv2.circle(frame, (roi_low[0], roi_low[1]), roi_low[2], (0, 255, 0), 1)
-    if roi_high:
+    if roi_high and not getattr(config, "DEBUG_HIDE_RED_CIRCLE_WHEN_POLYGON", False):
         cv2.circle(frame, (roi_high[0], roi_high[1]), roi_high[2], (0, 0, 255), 1)
-    if not roi_low and not roi_high:
+    if not polygon and not roi_low and not roi_high:
         roi = tracker.get_arena_roi()
         if roi:
             cv2.circle(frame, (roi[0], roi[1]), roi[2], (0, 255, 255), 1)
     rim = tracker.get_rim_circle()
     if rim:
         cv2.circle(frame, (rim[0], rim[1]), rim[2], (255, 200, 0), 1)
+
+    rail_mask = tracker.get_rail_mask()
+    if rail_mask is not None and tracker.get_polygon_points() is None:
+        overlay = frame.copy()
+        overlay[rail_mask > 0] = (0, 128, 0)
+        cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
 
     for b in tracker.get_states():
         cx, cy = int(b.position[0]), int(b.position[1])
