@@ -18,7 +18,14 @@ import cv2
 import config
 from arena import setup_arena_roi
 from overlay.debug import draw_debug_overlay_from_config
-from roi import load_rail_mask_points, save_rail_mask_points, select_rail_mask_points
+from roi import (
+    load_rail_mask_points,
+    load_red_zone,
+    save_rail_mask_points,
+    save_red_zone,
+    select_rail_mask_points,
+    select_red_zone,
+)
 from overlay.effects import (
     draw_impact_effect_from_config,
     draw_impact_label_from_config,
@@ -216,6 +223,11 @@ def main() -> None:
         action="store_true",
         help="Manually select rail mask: click points along the green rail (8-12 pts), then [c]"
     )
+    parser.add_argument(
+        "-rz", "--red-zone",
+        action="store_true",
+        help="Manually select red zone: click center, then edge of circle, then [c]"
+    )
     args = parser.parse_args()
 
     if args.video:
@@ -243,6 +255,23 @@ def main() -> None:
 
     first_frame = preprocess_frame_hsv_from_config(first_frame, config)
     setup_arena_roi(tracker, first_frame, manual=args.arena)
+
+    red_zone_file = getattr(config, "RED_ZONE_POINTS_FILE", "output/red_zone.json")
+    if args.red_zone:
+        red_zone = select_red_zone(first_frame)
+        if red_zone:
+            cx, cy, r = red_zone
+            save_red_zone(red_zone_file, cx, cy, r, frame_shape=first_frame.shape)
+            tracker.set_arena_roi_high_only(cx, cy, r)
+            print(f"Red zone saved: center=({cx},{cy}) r={r}")
+        else:
+            print("Red zone selection cancelled")
+    else:
+        red_zone = load_red_zone(red_zone_file, frame_shape=first_frame.shape)
+        if red_zone:
+            cx, cy, r = red_zone
+            tracker.set_arena_roi_high_only(cx, cy, r)
+            print(f"Red zone loaded: center=({cx},{cy}) r={r}")
 
     points_file = getattr(config, "RAIL_MASK_POINTS_FILE", "output/rail_mask_points.json")
     if args.rail_mask:

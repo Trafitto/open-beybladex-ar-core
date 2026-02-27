@@ -808,13 +808,18 @@ class BeyTracker:
         if not self._bey or not candidates:
             return {}, list(range(len(candidates)))
 
-        max_dist = getattr(config, "MATCH_MAX_DISTANCE", 200)
+        base_dist = getattr(config, "MATCH_MAX_DISTANCE", 200)
+        fast_dist = getattr(config, "MATCH_MAX_DISTANCE_FAST", 0)
+        fast_thresh = float(getattr(config, "MATCH_FAST_SPEED_THRESHOLD", 40))
         identity_w = getattr(config, "MATCH_IDENTITY_WEIGHT", 4.0)
         max_drift = getattr(config, "IDENTITY_HUE_MAX_DRIFT", 0)
 
         pairs: List[Tuple[float, int, int]] = []
         for bi, b in enumerate(self._bey):
             pred = b.kalman_predict()
+            max_dist = base_dist
+            if fast_dist > 0 and b.speed >= fast_thresh:
+                max_dist = fast_dist
             identity_hue = self._get_identity_hue(b)
             for ci, (cx, cy, _r, hue) in enumerate(candidates):
                 d = distance((cx, cy), pred)
@@ -986,7 +991,15 @@ class BeyTracker:
             if self._near_rim(cx, cy):
                 continue
             if self._near_polygon_edge(cx, cy):
-                continue
+                if getattr(config, "RAIL_TRACKING_ALLOW_EDGE", False) and self._bey:
+                    max_dist = getattr(config, "MATCH_MAX_DISTANCE", 200)
+                    near_tracked = any(
+                        distance((cx, cy), b.position) < max_dist for b in self._bey
+                    )
+                    if not near_tracked:
+                        continue
+                else:
+                    continue
             all_candidates.append((float(cx), float(cy), float(r), hue))
 
         # Deduplicate: overlapping circles = same physical bey, keep one

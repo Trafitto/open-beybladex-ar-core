@@ -19,7 +19,7 @@ TARGET_FPS = 60           # Target frame rate when using live camera
 HOUGH_DP = 1.2
 HOUGH_MIN_DIST = 18
 HOUGH_PARAM1 = 80
-HOUGH_PARAM2 = 14
+HOUGH_PARAM2 = 12
 HOUGH_MIN_RADIUS = 10
 HOUGH_MAX_RADIUS = 20
 
@@ -70,9 +70,9 @@ ARENA_ROI_OFFSET_Y = 0
 
 # Tracking
 # MAX_BEY_COUNT: max beys to track (2 = both in arena)
-# MAX_RECOVERY_FRAMES: drop bey if not seen for this many frames
+# MAX_RECOVERY_FRAMES: drop bey if not seen for this many frames (higher = keep rail-accelerating bey longer)
 MAX_BEY_COUNT = 2
-MAX_RECOVERY_FRAMES = 20
+MAX_RECOVERY_FRAMES = 35
 BOOTSTRAP_MIN_SPEED = 8.0
 MAX_STUCK_FRAMES = 10
 
@@ -128,6 +128,11 @@ RAIL_MASK_SAVE_PATH = ""   # e.g. "output/rail_mask.png" to save mask for inspec
 RAIL_MASK_POINTS_FILE = "output/rail_mask_points.json"
 # POLYGON_EDGE_MARGIN: reject circles within this many px of polygon edge (0 = disabled)
 POLYGON_EDGE_MARGIN = 18
+# RED_ZONE_POINTS_FILE: save/load red zone from -rz selection; used when -rz or file exists
+RED_ZONE_POINTS_FILE = "output/red_zone.json"
+# RAIL_TRACKING_ALLOW_EDGE: when True, allow near-edge circles if within MATCH_MAX_DISTANCE of a tracked bey
+# Enables tracking when bey accelerates along the rail (attack launch)
+RAIL_TRACKING_ALLOW_EDGE = True
 
 # Plastic dome cover: reduces glare/specular reflections and optional text-region exclude
 # DOME_GLARE: zero S in bright specular spots (high V, low S) before Hough
@@ -147,11 +152,14 @@ COLOR_ADAPT_RATE = 0.05
 
 # Candidate matching (Hough circle -> tracked bey assignment)
 # MATCH_MAX_DISTANCE: max px from Kalman prediction to accept as same bey
-#   higher = tolerate faster motion / more missed frames
+#   higher = tolerate faster motion / more missed frames (rail acceleration)
+# MATCH_MAX_DISTANCE_FAST: when bey speed > MATCH_FAST_SPEED_THRESHOLD, use this (0 = use MATCH_MAX_DISTANCE only)
 # MATCH_IDENTITY_WEIGHT: penalty for hue mismatch with stored identity; higher = avoid swapping bey1/bey2
 # IDENTITY_HUE_MAX_DRIFT: max hue distance from identity to accept match; beyond = reject (0 = disabled)
 # IDENTITY_BOOTSTRAP_FRAMES: collect hue samples over first N frames to stabilise identity (spin/incline)
-MATCH_MAX_DISTANCE = 380
+MATCH_MAX_DISTANCE = 500
+MATCH_MAX_DISTANCE_FAST = 550
+MATCH_FAST_SPEED_THRESHOLD = 40
 MATCH_IDENTITY_WEIGHT = 8.0
 IDENTITY_HUE_MAX_DRIFT = 35
 IDENTITY_BOOTSTRAP_FRAMES = 15
@@ -167,9 +175,8 @@ CANDIDATE_MIN_SEPARATION = 28
 # KALMAN_MEASUREMENT_NOISE: lower = snap to detection faster
 # KALMAN_LOSS_VELOCITY_DECAY: when Hough misses, velocity *= this each frame
 #   higher = prediction keeps moving along last velocity
-# KALMAN_MAX_PREDICTION_DRIFT: max px prediction can drift from last real position
-# KALMAN_MAX_VELOCITY_PX: when prediction exceeds this velocity (px/frame), reject it and hold
-#   position; rely on Hough to re-acquire the colored circle (0 = no limit)
+# KALMAN_MAX_PREDICTION_DRIFT: max px prediction can drift from last real position (higher = track fast rail acceleration)
+# KALMAN_MAX_VELOCITY_PX: when prediction exceeds this velocity (px/frame), reject and hold (0 = no limit; use 0 for rail)
 # Stadium boundary: when bey is near the rim, remove outward velocity component (0.92 = outer 8%)
 KALMAN_RIM_CLAMP_FRAC = 1
 # Circular motion: fit recent positions to circle, predict along arc (Beyblades orbit stadium)
@@ -180,9 +187,9 @@ KALMAN_PROCESS_NOISE = 0.45
 CIRCULAR_PREDICTION_ENABLED = True
 CIRCULAR_HISTORY_LEN = 20
 KALMAN_MEASUREMENT_NOISE = 0.15
-KALMAN_LOSS_VELOCITY_DECAY = 0.92
-KALMAN_MAX_PREDICTION_DRIFT = 100
-KALMAN_MAX_VELOCITY_PX = 55
+KALMAN_LOSS_VELOCITY_DECAY = 0.95
+KALMAN_MAX_PREDICTION_DRIFT = 200
+KALMAN_MAX_VELOCITY_PX = 120
 
 # Collision detection
 # COLLISION_COOLDOWN_FRAMES: min frames between collision events
