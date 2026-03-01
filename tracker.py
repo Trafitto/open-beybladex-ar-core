@@ -18,6 +18,12 @@ import cv2
 import numpy as np
 
 import config
+
+try:
+    import mediapipe as mp
+    _MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    _MEDIAPIPE_AVAILABLE = False
 from physics import compute_velocity
 from utils import distance, moving_average_position
 
@@ -342,6 +348,28 @@ class BeyTracker:
         self._rail_mask: Optional[np.ndarray] = None
         self._polygon_points: Optional[List[Tuple[int, int]]] = None
         self._rail_hue_learned: bool = False
+        self._hand_detector: Any = None
+        self._hand_mask: Optional[np.ndarray] = None
+        self._analyze_log: Optional[List[Dict[str, Any]]] = (
+            [] if getattr(config, "ANALYZE_MODE", False) else None
+        )
+        self._launch_phase_frames: int = 0
+
+        if (
+            getattr(config, "HAND_EXCLUSION_ENABLED", False)
+            and _MEDIAPIPE_AVAILABLE
+        ):
+            try:
+                self._hand_detector = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=2,
+                    min_detection_confidence=float(
+                        getattr(config, "HAND_MIN_DETECTION_CONFIDENCE", 0.5)
+                    ),
+                    min_tracking_confidence=0.3,
+                )
+            except Exception:
+                self._hand_detector = None
 
     # ------------------------------------------------------------------ #
     #  Arena ROI                                                          #
@@ -907,6 +935,139 @@ class BeyTracker:
             return out
         return out if any_mask else None
 
+    def _build_hand_mask(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """Build hand exclusion mask via MediaPipe Hands. Returns uint8 255=excluded, or None."""
+        if self._hand_detector is None:
+            return None
+        if not getattr(config, "HAND_EXCLUSION_ENABLED", False):
+            return None
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self._hand_detector.process(rgb)
+        if not results.multi_hand_landmarks:
+            return None
+        mask = np.zeros((h, w), dtype=np.uint8)
+        dilate_px = int(getattr(config, "HAND_MASK_DILATE_PX", 25))
+        for hand_landmarks in results.multi_hand_landmarks:
+            pts = []
+            for lm in hand_landmarks.landmark:
+                px = int(lm.x * w)
+                py = int(lm.y * h)
+                pts.append([px, py])
+            if len(pts) < 3:
+                continue
+            pts = np.array(pts, dtype=np.int32)
+            hull = cv2.convexHull(pts)
+            cv2.fillConvexPoly(mask, hull, 255)
+        if np.sum(mask > 0) < 50:
+            return None
+        if dilate_px > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1)
+            )
+            mask = cv2.dilate(mask, kernel)
+        return mask
+
+    def _inside_hand_mask(self, x: float, y: float) -> bool:
+        """True if (x,y) falls inside the current frame's hand mask."""
+        if self._hand_mask is None:
+            return False
+        ix, iy = int(round(x)), int(round(y))
+        h, w = self._hand_mask.shape[:2]
+        if ix < 0 or ix >= w or iy < 0 or iy >= h:
+            return False
+        return self._hand_mask[iy, ix] > 0
+
+    def _surrounding_looks_like_stadium(
+        self, frame: np.ndarray, cx: float, cy: float, r: float
+    ) -> bool:
+        """True if the ring around the circle looks like stadium floor (white/light).
+
+        Beyblades ON the stadium have white floor around them. Held Beyblades have
+        hand, launcher, or background. Stadium floor = low saturation. Also reject
+        if skin-colored pixels (hand) are present in the ring.
+        """
+        if not getattr(config, "STADIUM_CONTACT_ENABLED", False):
+            return True
+        if getattr(config, "STADIUM_CONTACT_SKIP_NEAR_TRACKED", False) and self._bey:
+            max_d = getattr(config, "MATCH_MAX_DISTANCE", 200)
+            min_speed = float(getattr(config, "STADIUM_CONTACT_SKIP_MIN_SPEED", 6.0))
+            for b in self._bey:
+                if distance((cx, cy), b.position) < max_d and b.speed >= min_speed:
+                    return True
+        fh, fw = frame.shape[:2]
+        inner = max(2, r * float(getattr(config, "STADIUM_CONTACT_RING_INNER", 1.05)))
+        outer = max(inner + 2, r * float(getattr(config, "STADIUM_CONTACT_RING_OUTER", 2.0)))
+        y1 = max(0, int(cy - outer))
+        y2 = min(fh, int(cy + outer + 1))
+        x1 = max(0, int(cx - outer))
+        x2 = min(fw, int(cx + outer + 1))
+        if y2 <= y1 or x2 <= x1:
+            return False
+        patch = frame[y1:y2, x1:x2]
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        ph, pw = patch.shape[:2]
+        cx_l = cx - x1
+        cy_l = cy - y1
+        Y, X = np.ogrid[:ph, :pw]
+        dist_sq = (X - cx_l) ** 2 + (Y - cy_l) ** 2
+        ring = (dist_sq >= inner ** 2) & (dist_sq <= outer ** 2)
+        H = hsv[:, :, 0]
+        S = hsv[:, :, 1]
+        V = hsv[:, :, 2]
+        ring_h = H[ring]
+        ring_s = S[ring]
+        ring_v = V[ring]
+        n_ring = len(ring_h)
+        if n_ring < 10:
+            return False
+        max_sat = int(getattr(config, "STADIUM_CONTACT_MAX_SAT", 48))
+        min_frac = float(getattr(config, "STADIUM_CONTACT_MIN_FRAC", 0.50))
+        stadium_like = np.sum(ring_s < max_sat) / n_ring
+        if stadium_like < min_frac:
+            return False
+        max_skin = float(getattr(config, "STADIUM_CONTACT_MAX_SKIN_FRAC", 0))
+        if max_skin > 0:
+            skin_lo = (ring_h <= 25) & (ring_s >= 30) & (ring_s <= 180) & (ring_v >= 50)
+            skin_hi = (ring_h >= 170) & (ring_s >= 30) & (ring_s <= 180) & (ring_v >= 50)
+            skin_frac = (np.sum(skin_lo) + np.sum(skin_hi)) / n_ring
+            if skin_frac > max_skin:
+                return False
+        if getattr(config, "STADIUM_CONTACT_REQUIRE_LOWER_HALF", False):
+            lower_ring = ring & (Y >= cy_l)
+            n_lower = np.sum(lower_ring)
+            if n_lower >= 5:
+                lower_s = S[lower_ring]
+                lower_stadium = np.sum(lower_s < max_sat) / n_lower
+                if lower_stadium < min_frac:
+                    return False
+        return True
+
+    def _circle_overlaps_hand(self, cx: float, cy: float, r: float) -> bool:
+        """True if the circle (Beyblade candidate) overlaps the hand enough to be considered 'in hand'.
+
+        Samples center + 8 points on the perimeter. A Beyblade held during show-off will have
+        several points inside the hand mask (fingers around it).
+        """
+        if self._hand_mask is None:
+            return False
+        threshold = int(getattr(config, "HAND_OVERLAP_REJECT_POINTS", 3))
+        count = 0
+        pts = [(cx, cy)]
+        for i in range(8):
+            a = i * np.pi / 4
+            pts.append((cx + r * np.cos(a), cy + r * np.sin(a)))
+        for px, py in pts:
+            if self._inside_hand_mask(px, py):
+                count += 1
+                if count >= threshold:
+                    return True
+        return False
+
+    def get_hand_mask(self) -> Optional[np.ndarray]:
+        """Return the current frame's hand exclusion mask (for debug overlay)."""
+        return self._hand_mask
+
     def get_dome_mask(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """Build dome exclusion mask for snapshot/preview. Returns uint8 255=excluded."""
         if getattr(config, "HOUGH_DETECTION_CHANNEL", "grayscale") != "saturation":
@@ -953,9 +1114,18 @@ class BeyTracker:
             dome_mask = self._build_dome_mask(hsv, s)
             if dome_mask is not None:
                 s[dome_mask > 0] = 0
+            hand_mask = self._build_hand_mask(frame)
+            self._hand_mask = hand_mask
+            if hand_mask is not None:
+                s[hand_mask > 0] = 0
             channel = s
         else:
+            hand_mask = self._build_hand_mask(frame)
+            self._hand_mask = hand_mask
             channel = gray
+            if hand_mask is not None:
+                channel = channel.copy()
+                channel[hand_mask > 0] = 0
 
         if (
             self._rail_mask is not None
@@ -1000,6 +1170,10 @@ class BeyTracker:
                         continue
                 else:
                     continue
+            if self._circle_overlaps_hand(cx, cy, r):
+                continue
+            if not self._surrounding_looks_like_stadium(frame, cx, cy, r):
+                continue
             all_candidates.append((float(cx), float(cy), float(r), hue))
 
         # Deduplicate: overlapping circles = same physical bey, keep one
@@ -1067,6 +1241,10 @@ class BeyTracker:
                 if len(self._bey) >= config.MAX_BEY_COUNT:
                     break
                 cx, cy, r, hue = candidates[ci]
+
+                if getattr(config, "DISCOVERY_REQUIRE_MOTION", False):
+                    if not self._has_motion_at(gray, int(cx), int(cy), r):
+                        continue
 
                 # Must be far enough from every already-tracked bey
                 too_close = False
@@ -1245,7 +1423,53 @@ class BeyTracker:
 
         if not self._bey:
             self._bootstrapped = False
+            self._launch_phase_frames = 0
+            if self._analyze_log is not None:
+                hands = self._hand_mask is not None and np.sum(self._hand_mask > 0) > 100
+                self._analyze_log.append({
+                    "frame": self._frame_index,
+                    "n_candidates": len(candidates),
+                    "n_tracked": 0,
+                    "hands_detected": hands,
+                    "speeds": [],
+                    "max_speed": 0.0,
+                    "min_speed": 0.0,
+                })
+            self._prev_gray = gray.copy()
             return
+
+        # --- 7b. Launch-phase clear ---
+        if getattr(config, "LAUNCH_CLEAR_ENABLED", False) and self._bey:
+            hands = self._hand_mask is not None and np.sum(self._hand_mask > 0) > 100
+            require_hands = getattr(config, "LAUNCH_CLEAR_REQUIRE_HANDS", False)
+            clear_speed = float(getattr(config, "LAUNCH_CLEAR_SPEED", 8.0))
+            clear_frames = int(getattr(config, "LAUNCH_CLEAR_FRAMES", 10))
+            low_speed = all(b.speed < clear_speed for b in self._bey)
+            if low_speed and (not require_hands or hands):
+                self._launch_phase_frames += 1
+                if self._launch_phase_frames >= clear_frames:
+                    self._bootstrapped = False
+                    self._bey.clear()
+                    self._identity_bootstrap.clear()
+                    self._launch_phase_frames = 0
+                    if config.DEBUG_PRINT:
+                        print(
+                            f"Launch clear: hands + low speed for {clear_frames} frames"
+                        )
+                    self._prev_gray = gray.copy()
+                    if self._analyze_log is not None:
+                        self._analyze_log.append({
+                            "frame": self._frame_index,
+                            "n_candidates": 0,
+                            "n_tracked": 0,
+                            "hands_detected": True,
+                            "speeds": [],
+                            "max_speed": 0.0,
+                            "min_speed": 0.0,
+                        })
+                    return
+            else:
+                self._launch_phase_frames = 0
 
         # --- 8. Stuck detection ---
         min_speed = getattr(config, "BOOTSTRAP_MIN_SPEED", 5.0)
@@ -1266,6 +1490,19 @@ class BeyTracker:
         # Store for next frame's motion check
         self._prev_gray = gray.copy()
 
+        if self._analyze_log is not None:
+            hands = self._hand_mask is not None and np.sum(self._hand_mask > 0) > 100
+            speeds = [b.speed for b in self._bey]
+            self._analyze_log.append({
+                "frame": self._frame_index,
+                "n_candidates": len(candidates),
+                "n_tracked": len(self._bey),
+                "hands_detected": hands,
+                "speeds": speeds,
+                "max_speed": max(speeds) if speeds else 0.0,
+                "min_speed": min(speeds) if speeds else 0.0,
+            })
+
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
     # ------------------------------------------------------------------ #
@@ -1282,3 +1519,7 @@ class BeyTracker:
     def get_debug_masks(self, frame: np.ndarray) -> Dict[int, np.ndarray]:
         """No colour masks in this pipeline -- returns empty dict."""
         return {}
+
+    def get_analyze_log(self) -> List[Dict[str, Any]]:
+        """Return per-frame analysis log when ANALYZE_MODE is enabled."""
+        return list(self._analyze_log) if self._analyze_log is not None else []

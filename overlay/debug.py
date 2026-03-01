@@ -113,6 +113,12 @@ def draw_debug_overlay(
         overlay[rail_mask > 0] = (0, 128, 0)
         cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
 
+    hand_mask = getattr(tracker, "get_hand_mask", lambda: None)()
+    if hand_mask is not None:
+        overlay = frame.copy()
+        overlay[hand_mask > 0] = (0, 165, 255)
+        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+
     for b in tracker.get_states():
         cx, cy = int(b.position[0]), int(b.position[1])
         r_bey = int(b.radius)

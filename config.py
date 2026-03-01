@@ -19,7 +19,7 @@ TARGET_FPS = 60           # Target frame rate when using live camera
 HOUGH_DP = 1.2
 HOUGH_MIN_DIST = 18
 HOUGH_PARAM1 = 80
-HOUGH_PARAM2 = 12
+HOUGH_PARAM2 = 14
 HOUGH_MIN_RADIUS = 10
 HOUGH_MAX_RADIUS = 20
 
@@ -61,7 +61,7 @@ HSV_SAT_SCALE = 1.35
 # PREFER_HIGH_PRIORITY: prefer candidates in red zone when matching
 ARENA_ROI = (0.5, 0.52, 0.60)
 PREFER_HIGH_PRIORITY = True
-ARENA_ROI_HIGH = (0.5, 0.40, 0.35)
+ARENA_ROI_HIGH = (0.5, 0.40, 0.40)
 ARENA_ROI_LOW = None
 ARENA_REFERENCE_DIR = "references/arena"
 ARENA_RIM_SHRINK = 0.70
@@ -72,7 +72,7 @@ ARENA_ROI_OFFSET_Y = 0
 # MAX_BEY_COUNT: max beys to track (2 = both in arena)
 # MAX_RECOVERY_FRAMES: drop bey if not seen for this many frames (higher = keep rail-accelerating bey longer)
 MAX_BEY_COUNT = 2
-MAX_RECOVERY_FRAMES = 35
+MAX_RECOVERY_FRAMES = 20
 BOOTSTRAP_MIN_SPEED = 8.0
 MAX_STUCK_FRAMES = 10
 
@@ -88,7 +88,7 @@ SMOOTH_WINDOW_SIZE = 1
 BEY_RADIUS_SCALE = 1.4
 # Beyblade identification: custom labels per slot (first bey=0, second=1)
 # Empty or ["", ""] = use color name from hue (Red, Blue, etc.)
-BEY_IDENTITIES = ["Blader 1", "Blader 2"]   # e.g. ["Player 1", "Player 2"] or ["Dragon", "Phoenix"]
+BEY_IDENTITIES = ["Beyblade 1", "Beyblade 2"]   # e.g. ["Player 1", "Player 2"] or ["Dragon", "Phoenix"]
 # Collision: margin extended from each bey circle; overlap of two zones = impact
 # Minimum 1px used when 0. With -d, gray=circle, magenta=zone.
 BEY_COLLISION_MARGIN_PX = 10
@@ -147,6 +147,42 @@ DOME_EXCLUDE_ANGLE_END = 225
 # DOME_MASK_SAVE_PATH: save path for run_dome_mask_snapshot.py (e.g. output/dome_mask.png)
 DOME_MASK_SAVE_PATH = "output/dome_mask.png"
 
+# Hand exclusion: when hands appear (e.g. during launch), exclude them from Beyblade tracking
+# Uses MediaPipe Hands to detect hands and mask them out before Hough circle detection
+# HAND_EXCLUSION_ENABLED: enable hand exclusion (requires mediapipe)
+# HAND_MASK_DILATE_PX: expand hand mask by this many pixels (landmarks are on joints, not outline)
+# HAND_MIN_DETECTION_CONFIDENCE: MediaPipe min confidence for hand detection (0-1)
+# HAND_OVERLAP_REJECT_POINTS: reject circle if this many sample points (center + 8 on perimeter) fall in hand
+#   Beyblade held in hand = circle overlaps fingers; 3+ points catches "show-off" phase before launch
+HAND_EXCLUSION_ENABLED = True
+HAND_MASK_DILATE_PX = 50
+HAND_MIN_DETECTION_CONFIDENCE = 0.5
+HAND_OVERLAP_REJECT_POINTS = 5
+
+# Stadium contact: reject circles whose surrounding context does not look like stadium floor
+# When Beyblade is ON the stadium, the ring around it is white/light (low S). When held, it's hand/launcher.
+# STADIUM_CONTACT_ENABLED: require surrounding pixels to look like stadium floor
+# STADIUM_CONTACT_RING_INNER: inner radius of annulus as multiple of circle radius (1.05 = just outside)
+# STADIUM_CONTACT_RING_OUTER: outer radius of annulus
+# STADIUM_CONTACT_MAX_SAT: pixels with S below this count as "stadium floor"; white floor = low S
+# STADIUM_CONTACT_MIN_FRAC: min fraction of ring pixels that must be stadium-like (0-1)
+# STADIUM_CONTACT_SKIP_NEAR_TRACKED: when True, skip check if candidate is near an existing tracked bey
+#   that is moving fast (rail acceleration: bey moves to rim where ring may include green rail)
+# STADIUM_CONTACT_SKIP_MIN_SPEED: only skip when nearby bey has speed >= this (px/frame); avoids
+#   feedback loop where held bey keeps passing because we keep updating it
+# STADIUM_CONTACT_MAX_SKIN_FRAC: reject if this fraction of ring is skin-colored (hand present); 0=disabled
+# STADIUM_CONTACT_REQUIRE_LOWER_HALF: when True, also require the lower half of ring to be stadium-like
+#   (Beyblade touches floor below it; when held, lower half = hand)
+STADIUM_CONTACT_ENABLED = True
+STADIUM_CONTACT_RING_INNER = 1.05
+STADIUM_CONTACT_RING_OUTER = 2.0
+STADIUM_CONTACT_MAX_SAT = 58
+STADIUM_CONTACT_MIN_FRAC = 0.35
+STADIUM_CONTACT_SKIP_NEAR_TRACKED = True
+STADIUM_CONTACT_SKIP_MIN_SPEED = 4.0
+STADIUM_CONTACT_MAX_SKIN_FRAC = 0.25
+STADIUM_CONTACT_REQUIRE_LOWER_HALF = False
+
 COLOR_HUE_TOLERANCE = 22
 COLOR_ADAPT_RATE = 0.05
 
@@ -164,9 +200,23 @@ MATCH_IDENTITY_WEIGHT = 8.0
 IDENTITY_HUE_MAX_DRIFT = 35
 IDENTITY_BOOTSTRAP_FRAMES = 15
 
+# Launch-phase clear: when all beys have low speed for N frames, clear tracking.
+# Show-off/launch = held beys (low speed). Battle = spinning (high speed).
+# LAUNCH_CLEAR_ENABLED: enable this rule
+# LAUNCH_CLEAR_REQUIRE_HANDS: also require hands detected (stricter; skip when MediaPipe fails)
+# LAUNCH_CLEAR_SPEED: max speed (px/frame) to count as "launch phase"
+# LAUNCH_CLEAR_FRAMES: consecutive frames before clearing
+LAUNCH_CLEAR_ENABLED = True
+LAUNCH_CLEAR_REQUIRE_HANDS = False
+LAUNCH_CLEAR_SPEED = 8.0
+LAUNCH_CLEAR_FRAMES = 10
+
 # New bey discovery
 # DISCOVERY_MIN_SEPARATION: min px from any tracked bey to register new one
+# DISCOVERY_REQUIRE_MOTION: only register new bey if frame-diff shows motion at that spot
+#   Held Beyblades are static; spinning ones have motion. Helps exclude show-off phase.
 DISCOVERY_MIN_SEPARATION = 35
+DISCOVERY_REQUIRE_MOTION = True
 # CANDIDATE_MIN_SEPARATION: two Hough circles closer than this are same object; keep one
 CANDIDATE_MIN_SEPARATION = 28
 
