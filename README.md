@@ -50,7 +50,18 @@ python main.py
 
 - **Exit**: press `q` in the webcam window to close.
 
-CLI arguments: `-v` video input, `-s` save output, `-d` debug, `-e` trail/impact effects, `-w` WebSocket for `open_beybladex_ar_web` SFX projection, `-a` manually select arena ROI, `-rm` manually select rail mask polygon (click along inner edge of rail), `-rz` manually select red zone (high-priority circle: center + edge, saved to `RED_ZONE_POINTS_FILE`).
+CLI arguments:
+
+| Flag | Description |
+|------|-------------|
+| `-v` | Video input |
+| `-s` | Save output |
+| `-d` | Debug |
+| `-e` | Trail/impact effects |
+| `-w` | WebSocket for `open_beybladex_ar_web` SFX projection |
+| `-a` | Manually select arena ROI |
+| `-rm` | Manually select rail mask polygon (click along inner edge of rail) |
+| `-rz` | Manually select red zone (high-priority circle: center + edge, saved to `RED_ZONE_POINTS_FILE`) |
 
 ### Mask preview tools
 
