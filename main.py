@@ -17,6 +17,7 @@ import cv2
 
 import config
 from arena import setup_arena_roi
+from video_stream import WebcamVideoStream, is_live_source
 from overlay.debug import draw_debug_overlay_from_config
 from roi import (
     load_rail_mask_points,
@@ -40,15 +41,46 @@ from utils import get_bey_label
 from web import build_tracking_data, push_tracking_web, run_websocket_server
 
 
+def _live_preview(cap, *, proc_w: int = 0, proc_h: int = 0) -> "np.ndarray | None":
+    """Show a live camera feed until the user presses SPACE to freeze a frame.
+
+    Returns the frozen (and optionally resized) frame, or None if the user
+    pressed 'q' to abort.
+    """
+    import numpy as np  # local to avoid top-level import cost when unused
+
+    win = "Live Preview - press SPACE to freeze, Q to abort"
+    print("Live preview: press SPACE to freeze the frame for calibration, Q to abort")
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+        if proc_w > 0 and proc_h > 0:
+            fh, fw = frame.shape[:2]
+            if fw != proc_w or fh != proc_h:
+                frame = cv2.resize(frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
+        cv2.imshow(win, frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(" "):
+            cv2.destroyWindow(win)
+            return frame
+        if key == ord("q"):
+            cv2.destroyWindow(win)
+            return None
+
+
 def _run_main_loop(
     cap,
     tracker: BeyTracker,
     collision_detector: CollisionDetector,
     *,
     args,
+    is_live: bool,
 ) -> None:
-    video_fps = cap.get(cv2.CAP_PROP_FPS) if args.video else None
-    frame_duration = 1.0 / (video_fps or config.TARGET_FPS) if video_fps else None
+    video_fps = cap.get(cv2.CAP_PROP_FPS) if not is_live else None
+    # For video files: frame delay handled by cv2.waitKey(delay_ms)
+    # For live sources: cv2.waitKey(1) (non-blocking, just poll for 'q')
+    wait_ms = max(1, int(1000.0 / video_fps)) if video_fps else 1
 
     prev_time = time.time()
     out_writer = None
@@ -66,10 +98,18 @@ def _run_main_loop(
         ws_setter = run_websocket_server(ws_host, ws_port)
         time.sleep(0.3)
 
+    proc_w = getattr(config, "PROCESS_WIDTH", 0)
+    proc_h = getattr(config, "PROCESS_HEIGHT", 0)
+
     while True:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame is None:
             break
+
+        if proc_w > 0 and proc_h > 0:
+            fh, fw = frame.shape[:2]
+            if fw != proc_w or fh != proc_h:
+                frame = cv2.resize(frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
 
         frame_index += 1
         now = time.time()
@@ -158,11 +198,17 @@ def _run_main_loop(
                 get_bey_label(b, i, getattr(config, "BEY_IDENTITIES", None))
                 for i, b in enumerate(sorted_states)
             ]
+            arena_center = tracker.get_arena_center_px()
             data = build_tracking_data(
                 w, h, states, collision, impact_center, wall_hits,
                 collision_detector.event_count,
+                collision_event=collision_event,
                 radius_scale=config.BEY_RADIUS_SCALE,
                 identities=identities,
+                mm_per_pixel=tracker.mm_per_pixel,
+                arena_center_px=arena_center,
+                arena_radius_px=tracker.get_arena_radius_px(),
+                wall_hit_tolerance_mm=getattr(config, "WALL_HIT_TOLERANCE_MM", 15.0),
             )
             push_tracking_web(data, ws_setter)
 
@@ -185,13 +231,7 @@ def _run_main_loop(
 
         cv2.imshow("Beyblade X Arena", frame)
 
-        if video_fps is not None:
-            elapsed = time.time() - now
-            sleep_time = frame_duration - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
             break
 
     total_collisions = collision_detector.event_count
@@ -235,28 +275,52 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.video:
-        cap = cv2.VideoCapture(args.video)
-        if not cap.isOpened():
-            print("Cannot open video:", args.video)
+    proc_w = getattr(config, "PROCESS_WIDTH", 0)
+    proc_h = getattr(config, "PROCESS_HEIGHT", 0)
+
+    source = args.video if args.video else config.CAMERA_INDEX
+    is_live = is_live_source(source)
+
+    if is_live:
+        try:
+            cap = WebcamVideoStream(
+                source,
+                target_fps=config.TARGET_FPS,
+                width=proc_w,
+                height=proc_h,
+            ).start()
+        except RuntimeError as exc:
+            print(exc)
             return
-        video_fps = cap.get(cv2.CAP_PROP_FPS) or config.TARGET_FPS
+        print(f"Live source: {source} (threaded capture)")
     else:
-        cap = cv2.VideoCapture(config.CAMERA_INDEX)
+        cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            print("Cannot open camera")
+            print("Cannot open video:", source)
             return
-        cap.set(cv2.CAP_PROP_FPS, config.TARGET_FPS)
-        video_fps = None
+        fps = cap.get(cv2.CAP_PROP_FPS) or config.TARGET_FPS
+        print(f"Video file: {source} (frame-paced at {fps:.1f} fps)")
 
     tracker = BeyTracker()
     collision_detector = CollisionDetector()
 
-    ret, first_frame = cap.read()
-    if not ret:
-        print("Cannot read first frame")
-        cap.release()
-        return
+    needs_calibration = args.red_zone or args.rail_mask
+    if is_live and needs_calibration:
+        first_frame = _live_preview(cap, proc_w=proc_w, proc_h=proc_h)
+        if first_frame is None:
+            print("Live preview aborted")
+            cap.release()
+            return
+    else:
+        ret, first_frame = cap.read()
+        if not ret or first_frame is None:
+            print("Cannot read first frame")
+            cap.release()
+            return
+        if proc_w > 0 and proc_h > 0:
+            fh, fw = first_frame.shape[:2]
+            if fw != proc_w or fh != proc_h:
+                first_frame = cv2.resize(first_frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
 
     first_frame = preprocess_frame_hsv_from_config(first_frame, config)
     setup_arena_roi(tracker, first_frame, manual=args.arena)
@@ -299,9 +363,10 @@ def main() -> None:
             else:
                 print("Rail mask build failed; run with -rm to define polygon")
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    if not is_live:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    _run_main_loop(cap, tracker, collision_detector, args=args)
+    _run_main_loop(cap, tracker, collision_detector, args=args, is_live=is_live)
 
 
 if __name__ == "__main__":

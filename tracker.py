@@ -342,10 +342,35 @@ class BeyTracker:
         self._rail_mask: Optional[np.ndarray] = None
         self._polygon_points: Optional[List[Tuple[int, int]]] = None
         self._rail_hue_learned: bool = False
+        self._mm_per_pixel: float = 0.0
+        self._roi_miss_count: Dict[int, int] = {}
 
     # ------------------------------------------------------------------ #
     #  Arena ROI                                                          #
     # ------------------------------------------------------------------ #
+
+    def _recompute_mm_per_pixel(self) -> None:
+        """Derive the pixel-to-mm scale from the best available boundary.
+
+        Priority: rim_circle (Hough-detected rim) > polygon bounding circle
+        > arena_roi_low (outer ROI) > arena_roi (fallback).
+        """
+        diameter_px = 0.0
+
+        if self._rim_circle is not None:
+            diameter_px = self._rim_circle[2] * 2.0
+        elif self._polygon_points is not None and len(self._polygon_points) >= 3:
+            pts = np.array(self._polygon_points, dtype=np.float32)
+            _, radius = cv2.minEnclosingCircle(pts)
+            diameter_px = radius * 2.0
+        elif self._arena_roi_low is not None:
+            diameter_px = self._arena_roi_low[2] * 2.0
+        elif self._arena_roi is not None:
+            diameter_px = self._arena_roi[2] * 2.0
+
+        if diameter_px > 0:
+            diameter_mm = float(getattr(config, "STADIUM_DIAMETER_MM", 400.0))
+            self._mm_per_pixel = diameter_mm / diameter_px
 
     def set_arena_roi(self, cx: int, cy: int, r: int) -> None:
         ox = int(getattr(config, "ARENA_ROI_OFFSET_X", 0))
@@ -353,6 +378,7 @@ class BeyTracker:
         self._arena_roi = (int(cx) + ox, int(cy) + oy, int(r))
         self._arena_roi_high = None
         self._arena_roi_low = None
+        self._recompute_mm_per_pixel()
 
     def set_arena_roi_dual(
         self,
@@ -367,6 +393,7 @@ class BeyTracker:
         self._arena_roi = (cxi, cyi, r_low)
         self._arena_roi_high = (cxi, cyi, r_high)
         self._arena_roi_low = (cxi, cyi, r_low)
+        self._recompute_mm_per_pixel()
 
     def set_arena_roi_high_only(self, cx: int, cy: int, r: int) -> None:
         """Red circle only; no green. Use polygon for full area when set."""
@@ -376,6 +403,7 @@ class BeyTracker:
         self._arena_roi = (cxi, cyi, r)
         self._arena_roi_high = (cxi, cyi, r)
         self._arena_roi_low = None
+        self._recompute_mm_per_pixel()
 
     def get_arena_roi(self) -> Optional[Tuple[int, int, int]]:
         return self._arena_roi
@@ -388,6 +416,36 @@ class BeyTracker:
 
     def get_rim_circle(self) -> Optional[Tuple[int, int, int]]:
         return self._rim_circle
+
+    @property
+    def mm_per_pixel(self) -> float:
+        return self._mm_per_pixel
+
+    def get_arena_center_px(self) -> Optional[Tuple[int, int]]:
+        """Return the stadium center in pixels using the best available boundary."""
+        if self._rim_circle is not None:
+            return (self._rim_circle[0], self._rim_circle[1])
+        if self._polygon_points is not None and len(self._polygon_points) >= 3:
+            pts = np.array(self._polygon_points, dtype=np.float32)
+            (cx, cy), _ = cv2.minEnclosingCircle(pts)
+            return (int(cx), int(cy))
+        roi = self._arena_roi_low or self._arena_roi
+        if roi is not None:
+            return (roi[0], roi[1])
+        return None
+
+    def get_arena_radius_px(self) -> float:
+        """Return the stadium radius in pixels using the best available boundary."""
+        if self._rim_circle is not None:
+            return float(self._rim_circle[2])
+        if self._polygon_points is not None and len(self._polygon_points) >= 3:
+            pts = np.array(self._polygon_points, dtype=np.float32)
+            _, radius = cv2.minEnclosingCircle(pts)
+            return float(radius)
+        roi = self._arena_roi_low or self._arena_roi
+        if roi is not None:
+            return float(roi[2])
+        return 0.0
 
     def _inside_roi(self, x: float, y: float) -> bool:
         if self._polygon_points is not None:
@@ -494,6 +552,7 @@ class BeyTracker:
         pts = np.array(points, dtype=np.int32)
         cv2.fillPoly(play_area, [pts], 255)
         self._rail_mask = np.where(play_area > 0, 0, 255).astype(np.uint8)
+        self._recompute_mm_per_pixel()
         if save_path:
             parent = os.path.dirname(save_path)
             if parent:
@@ -601,6 +660,7 @@ class BeyTracker:
 
         shrink = float(getattr(config, "ARENA_RIM_SHRINK", 0.70))
         self._rim_circle = (int(cx), int(cy), int(r))
+        self._recompute_mm_per_pixel()
 
         rim_inner = int(r * shrink)
         rim_outer = int(r)
@@ -670,6 +730,7 @@ class BeyTracker:
 
         cx, cy, r = best
         self._rim_circle = (int(cx), int(cy), int(r))
+        self._recompute_mm_per_pixel()
 
         # Learn rim hue from the annulus
         H = hsv[:, :, 0]
@@ -699,11 +760,17 @@ class BeyTracker:
     # ------------------------------------------------------------------ #
 
     def _detect_circles_hough(
-        self, channel: np.ndarray, frame_shape: Tuple[int, ...]
+        self,
+        channel: np.ndarray,
+        frame_shape: Tuple[int, ...],
+        *,
+        offset: Tuple[int, int] = (0, 0),
     ) -> List[Tuple[Tuple[int, int], int]]:
         """Run HoughCircles on a single-channel image (saturation or grayscale).
 
         Returns list of ((cx, cy), radius) inside the ROI.
+        When *offset* is non-zero, adds it to every coordinate before the
+        ROI check (used for detection on cropped sub-images).
         """
         h, w = frame_shape[:2]
         min_dim = min(h, w)
@@ -727,8 +794,166 @@ class BeyTracker:
         )
         if circles is None:
             return []
-        out = [((int(c[0]), int(c[1])), int(c[2])) for c in circles[0]]
+        ox, oy = offset
+        out = [((int(c[0]) + ox, int(c[1]) + oy), int(c[2])) for c in circles[0]]
         return [c for c in out if self._inside_roi(c[0][0], c[0][1])]
+
+    # ------------------------------------------------------------------ #
+    #  Contour-based detection                                              #
+    # ------------------------------------------------------------------ #
+
+    def _detect_contours(
+        self,
+        channel: np.ndarray,
+        frame_shape: Tuple[int, ...],
+        *,
+        offset: Tuple[int, int] = (0, 0),
+    ) -> List[Tuple[Tuple[int, int], int]]:
+        """Find bey candidates via thresholding + contour analysis.
+
+        Takes the same saturation channel as _detect_circles_hough and
+        returns the same format: list of ((cx, cy), radius).
+        When *offset* is non-zero, adds it to every coordinate before the
+        ROI check (used for detection on cropped sub-images).
+        """
+        threshold = int(getattr(config, "CONTOUR_SAT_THRESHOLD", 35))
+        min_area = int(getattr(config, "CONTOUR_MIN_AREA", 150))
+        max_area = int(getattr(config, "CONTOUR_MAX_AREA", 8000))
+        min_circ = float(getattr(config, "CONTOUR_MIN_CIRCULARITY", 0.25))
+        morph_k = int(getattr(config, "CONTOUR_MORPH_KSIZE", 5))
+
+        _, binary = cv2.threshold(channel, threshold, 255, cv2.THRESH_BINARY)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        ox, oy = offset
+        out: List[Tuple[Tuple[int, int], int]] = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:
+                continue
+
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0:
+                continue
+            circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
+            if circularity < min_circ:
+                continue
+
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"]) + ox
+            cy = int(M["m01"] / M["m00"]) + oy
+
+            radius = int(np.sqrt(area / np.pi))
+
+            if self._inside_roi(cx, cy):
+                out.append(((cx, cy), radius))
+
+        return out
+
+    # ------------------------------------------------------------------ #
+    #  ROI-based detection                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _detect_in_roi(
+        self,
+        channel: np.ndarray,
+        center: Tuple[float, float],
+        roi_size: int,
+    ) -> List[Tuple[Tuple[int, int], int]]:
+        """Run detection on a small square crop around *center*.
+
+        Returns circles in **global** frame coordinates.
+        """
+        fh, fw = channel.shape[:2]
+        half = roi_size // 2
+        ci, cj = int(center[0]), int(center[1])
+
+        x1 = max(0, ci - half)
+        y1 = max(0, cj - half)
+        x2 = min(fw, ci + half)
+        y2 = min(fh, cj + half)
+
+        crop = channel[y1:y2, x1:x2]
+        if crop.size == 0:
+            return []
+
+        offset = (x1, y1)
+        method = getattr(config, "DETECTION_METHOD", "hough")
+        if method == "contour":
+            return self._detect_contours(crop, crop.shape, offset=offset)
+        return self._detect_circles_hough(crop, crop.shape, offset=offset)
+
+    def _detect_candidates(
+        self,
+        channel: np.ndarray,
+        frame_shape: Tuple[int, ...],
+    ) -> List[Tuple[Tuple[int, int], int]]:
+        """Two-tier detection: fast ROI per tracked bey, full-frame fallback.
+
+        Tier 1 (fast): for each tracked bey, crop a small window around its
+        linearly-extrapolated position and detect only there.
+        Tier 2 (fallback): runs on the full frame when a ROI search misses
+        or when new bey discovery is needed.
+
+        Returns the combined, deduplicated list of circles.
+        """
+        roi_enabled = getattr(config, "ROI_ENABLED", False)
+        roi_size = int(getattr(config, "ROI_SIZE", 0))
+        fallback_limit = int(getattr(config, "ROI_FALLBACK_FRAMES", 3))
+
+        if not roi_enabled or roi_size <= 0 or not self._bey:
+            return self._detect_full_frame(channel, frame_shape)
+
+        nominal_dt = 1.0 / max(getattr(config, "TARGET_FPS", 60), 1)
+        need_full_frame = len(self._bey) < config.MAX_BEY_COUNT
+
+        roi_circles: List[Tuple[Tuple[int, int], int]] = []
+        for b in self._bey:
+            pred_x = b.position[0] + b.velocity[0] * nominal_dt
+            pred_y = b.position[1] + b.velocity[1] * nominal_dt
+            found = self._detect_in_roi(channel, (pred_x, pred_y), roi_size)
+            if found:
+                roi_circles.extend(found)
+                self._roi_miss_count[b.id] = 0
+            else:
+                misses = self._roi_miss_count.get(b.id, 0) + 1
+                self._roi_miss_count[b.id] = misses
+                if misses >= fallback_limit:
+                    need_full_frame = True
+
+        if not need_full_frame:
+            return roi_circles
+
+        full_circles = self._detect_full_frame(channel, frame_shape)
+        if not roi_circles:
+            return full_circles
+
+        combined = list(roi_circles)
+        dedup_dist = float(getattr(config, "CANDIDATE_MIN_SEPARATION", 28))
+        for c in full_circles:
+            if not any(
+                distance(c[0], ec[0]) < dedup_dist for ec in combined
+            ):
+                combined.append(c)
+        return combined
+
+    def _detect_full_frame(
+        self,
+        channel: np.ndarray,
+        frame_shape: Tuple[int, ...],
+    ) -> List[Tuple[Tuple[int, int], int]]:
+        """Run detection on the entire channel (original path)."""
+        method = getattr(config, "DETECTION_METHOD", "hough")
+        if method == "contour":
+            return self._detect_contours(channel, frame_shape)
+        return self._detect_circles_hough(channel, frame_shape)
 
     # ------------------------------------------------------------------ #
     #  Color sampling                                                      #
@@ -942,7 +1167,11 @@ class BeyTracker:
             floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
             if floor > 0:
                 s = np.where(s >= floor, s, 0).astype(np.uint8)
-            if getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False):
+            use_clahe = (
+                getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False)
+                and getattr(config, "DETECTION_METHOD", "hough") != "contour"
+            )
+            if use_clahe:
                 clahe = cv2.createCLAHE(
                     clipLimit=float(getattr(config, "HOUGH_SAT_CLAHE_CLIP", 2.5)),
                     tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
@@ -973,8 +1202,8 @@ class BeyTracker:
                 if config.DEBUG_PRINT:
                     print(f"Learned rail hue from polygon: {self._rim_hue:.0f}")
 
-        # --- 1. Hough circles ---
-        circles = self._detect_circles_hough(channel, frame.shape)
+        # --- 1. Detect bey candidates (ROI fast-path when tracking) ---
+        circles = self._detect_candidates(channel, frame.shape)
 
         # --- 2. Sample center color, reject rim-coloured circles ---
         all_candidates: List[Tuple[float, float, float, float]] = []
@@ -1135,6 +1364,7 @@ class BeyTracker:
                     )
                     if not too_close:
                         self._identity_bootstrap.pop(replace_bey.id, None)
+                        self._roi_miss_count.pop(replace_bey.id, None)
                         self._bey.remove(replace_bey)
                         new_bey = BeyState(
                             id=replace_bey.id,
@@ -1191,6 +1421,7 @@ class BeyTracker:
                         to_drop.add(b2.id if keep is b1 else b1.id)
             for bid in to_drop:
                 self._identity_bootstrap.pop(bid, None)
+                self._roi_miss_count.pop(bid, None)
             self._bey = [b for b in self._bey if b.id not in to_drop]
 
         # --- 6d. Enforce MAX_BEY_COUNT: drop excess if ever over limit ---
@@ -1203,6 +1434,7 @@ class BeyTracker:
             )
             for b in self._bey[config.MAX_BEY_COUNT :]:
                 self._identity_bootstrap.pop(b.id, None)
+                self._roi_miss_count.pop(b.id, None)
             self._bey = self._bey[: config.MAX_BEY_COUNT]
 
         # --- 7. Drop beys lost, stationary, or outside polygon ---
@@ -1241,6 +1473,7 @@ class BeyTracker:
                     )
         for bid in dropped_ids:
             self._identity_bootstrap.pop(bid, None)
+            self._roi_miss_count.pop(bid, None)
         self._bey = [b for b in self._bey if b.id not in dropped_ids]
 
         if not self._bey:
@@ -1259,6 +1492,7 @@ class BeyTracker:
             self._bootstrapped = False
             self._bey.clear()
             self._identity_bootstrap.clear()
+            self._roi_miss_count.clear()
             self._frames_all_stuck = 0
             if config.DEBUG_PRINT:
                 print(f"All beys stuck for {max_stuck} frames -- clearing")
