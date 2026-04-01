@@ -19,8 +19,8 @@ TARGET_FPS = 60          # PS3 Eye max at 640x480
 PS3EYE_ENABLED = True
 PS3EYE_AUTOGAIN = 0           # 0 = manual, 1 = auto (bundles AGC + AEC)
 PS3EYE_AUTO_WHITE_BALANCE = 0  # 0 = manual, 1 = auto
-PS3EYE_EXPOSURE = 40          # 0-255 (low = less motion blur, darker image)
-PS3EYE_GAIN = 30              # 0-63  (compensates low exposure; higher = noisier)
+PS3EYE_EXPOSURE = 32          # 0-255 (low = less motion blur, darker image)
+PS3EYE_GAIN = 35              # 0-63  (compensates low exposure; higher = noisier)
 PS3EYE_BRIGHTNESS = 128       # 0-255
 PS3EYE_CONTRAST = 160         # 0-255
 PS3EYE_SHARPNESS = 40         # 0-63
@@ -56,6 +56,13 @@ HOUGH_PARAM2 = 14
 HOUGH_MIN_RADIUS = 10
 HOUGH_MAX_RADIUS = 22
 
+# Grayscale Hough fallback (when saturation contour misses low-color beys)
+# Lighter blur and lower Canny threshold to detect subtle edges from
+# metallic, transparent, or white beys against the white floor.
+HOUGH_GRAY_PARAM1 = 50
+HOUGH_GRAY_BLUR_KSIZE = (7, 7)
+HOUGH_GRAY_BLUR_SIGMA = 1.5
+
 # Detection method: "hough" (HoughCircles) or "contour" (findContours)
 # Contour is significantly faster (~3-5x) and works well when beys are
 # saturated blobs on a white floor.  Hough is more shape-specific.
@@ -74,8 +81,8 @@ HOUGH_DETECTION_CHANNEL = "saturation"
 # HOUGH_SAT_CLAHE_CLIP: CLAHE clip limit when enabled (2-4 typical)
 # PS3 Eye: higher floor (8) suppresses OV772x chroma noise on neutral surfaces;
 #   gentler CLAHE clip (2.2) avoids amplifying sensor noise.
-HOUGH_SAT_SCALE = 1.4
-HOUGH_SAT_FLOOR = 8
+HOUGH_SAT_SCALE = 2.0
+HOUGH_SAT_FLOOR = 12
 HOUGH_SAT_CLAHE_ENABLED = True
 HOUGH_SAT_CLAHE_CLIP = 2.2
 
@@ -100,9 +107,9 @@ GAUSSIAN_BLUR_SIGMA = 2.5
 # PS3 Eye: raised sat threshold (90) and morph kernel (7) to reject noise
 #   speckles that the noisier sensor produces; lowered circularity (0.20) to
 #   tolerate motion blur from the 60fps rolling shutter at low exposure.
-CONTOUR_SAT_THRESHOLD = 90
+CONTOUR_SAT_THRESHOLD = 45
 CONTOUR_MORPH_KSIZE = 7
-CONTOUR_MIN_AREA = 180
+CONTOUR_MIN_AREA = 100
 CONTOUR_MAX_AREA = 8000
 CONTOUR_MIN_CIRCULARITY = 0.20
 
@@ -126,7 +133,7 @@ ROI_FALLBACK_FRAMES = 3
 HSV_PREPROCESS_ENABLED = True
 HSV_CLAHE_CLIP = 2.0
 HSV_CLAHE_TILE = (8, 8)
-HSV_SAT_SCALE = 1.4
+HSV_SAT_SCALE = 1.8
 
 # Arena ROI
 # ARENA_ROI: single ROI fallback; (center_x_frac, center_y_frac, radius_frac).
@@ -152,7 +159,7 @@ MAX_STUCK_FRAMES = 10
 
 # Zero velocity = wrong object (e.g. tracking static green rail)
 # Drop bey if speed < threshold for this many consecutive frames (0 = disabled)
-ZERO_VELOCITY_CLEAR_FRAMES = 30
+ZERO_VELOCITY_CLEAR_FRAMES = 15
 ZERO_VELOCITY_THRESHOLD = 4.0
 
 # Position smoothing (1 = no smoothing; higher = smoother but laggier)
@@ -179,9 +186,9 @@ BEY_COLLISION_MARGIN_PX = 10
 #   weaker at low exposure; lower COLOR_VAL_MIN (30) to catch darker beys on
 #   the dimmer image; slightly relaxed fill (0.06) for the noisier centre patch.
 COLOR_SAMPLE_RADIUS_FRAC = 0.45
-COLOR_SAT_MIN = 28
+COLOR_SAT_MIN = 10
 COLOR_VAL_MIN = 30
-COLOR_CENTER_MIN_FILL = 0.06
+COLOR_CENTER_MIN_FILL = 0.02
 COLOR_MIN_HUE_SEPARATION = 12
 REJECT_HUE_RANGES = []   # Beyblade X stadium green X-rail; set [] if using green beys
 # REJECT_NEAR_RIM_FRACTION: reject circles in outer X of arena (0 = disabled)
@@ -206,7 +213,7 @@ RAIL_MASK_SAVE_PATH = ""   # e.g. "output/rail_mask.png" to save mask for inspec
 # RAIL_MASK_POINTS_FILE: save/load polygon points (tracking area); used when -rm or file missing
 RAIL_MASK_POINTS_FILE = "output/rail_mask_points.json"
 # POLYGON_EDGE_MARGIN: reject circles within this many px of polygon edge (0 = disabled)
-POLYGON_EDGE_MARGIN = 18
+POLYGON_EDGE_MARGIN = 28
 # RED_ZONE_POINTS_FILE: save/load red zone from -rz selection; used when -rz or file exists
 RED_ZONE_POINTS_FILE = "output/red_zone.json"
 # RAIL_TRACKING_ALLOW_EDGE: when True, allow near-edge circles if within MATCH_MAX_DISTANCE of a tracked bey

@@ -14,6 +14,7 @@ from collections import deque
 from datetime import datetime
 
 import cv2
+import numpy as np
 
 import config
 from arena import setup_arena_roi
@@ -111,6 +112,8 @@ def _run_main_loop(
             if fw != proc_w or fh != proc_h:
                 frame = cv2.resize(frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
 
+        raw_frame = frame.copy() if args.debug else None
+
         frame_index += 1
         now = time.time()
         dt = now - prev_time
@@ -118,8 +121,8 @@ def _run_main_loop(
         if dt <= 0:
             dt = 1.0 / (video_fps or config.TARGET_FPS)
 
-        frame = preprocess_frame_hsv_from_config(frame, config)
-        tracker.update(frame, dt)
+        processed = preprocess_frame_hsv_from_config(frame, config)
+        tracker.update(processed, dt)
         states = tracker.get_states()
         positions = [b.position for b in states]
         velocities = [b.velocity for b in states]
@@ -229,7 +232,32 @@ def _run_main_loop(
         if out_writer is not None:
             out_writer.write(frame)
 
-        cv2.imshow("Beyblade X Arena", frame)
+        if args.debug and raw_frame is not None:
+            hsv_dbg = cv2.cvtColor(processed, cv2.COLOR_BGR2HSV)
+            sat_ch = hsv_dbg[:, :, 1].astype(np.float32)
+            sat_ch *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
+            sat_ch = np.clip(sat_ch, 0, 255).astype(np.uint8)
+            sat_floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
+            if sat_floor > 0:
+                sat_ch = np.where(sat_ch >= sat_floor, sat_ch, 0).astype(np.uint8)
+            thresh = int(getattr(config, "CONTOUR_SAT_THRESHOLD", 90))
+            _, binary = cv2.threshold(sat_ch, thresh, 255, cv2.THRESH_BINARY)
+            sat_color = cv2.applyColorMap(sat_ch, cv2.COLORMAP_JET)
+            binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+            det_view = np.vstack([sat_color, binary_bgr])
+            det_view = cv2.resize(det_view, (frame.shape[1], frame.shape[0]),
+                                  interpolation=cv2.INTER_AREA)
+            def _label(img, text, y=18):
+                cv2.putText(img, text, (10, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+                cv2.putText(img, text, (10, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+            _label(det_view, f"SATURATION (top) + THRESHOLD>{thresh} (bottom)")
+            _label(frame, "CAMERA + OVERLAY")
+            combined = np.hstack([det_view, frame])
+            cv2.imshow("Beyblade X Arena", combined)
+        else:
+            cv2.imshow("Beyblade X Arena", frame)
 
         if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
             break
@@ -305,6 +333,7 @@ def main() -> None:
     collision_detector = CollisionDetector()
 
     needs_calibration = args.red_zone or args.rail_mask
+
     if is_live and needs_calibration:
         first_frame = _live_preview(cap, proc_w=proc_w, proc_h=proc_h)
         if first_frame is None:

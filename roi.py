@@ -49,7 +49,7 @@ def save_rail_mask_points(
     parent = os.path.dirname(filepath)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    data = {"points": [[int(x), int(y)] for x, y in points]}
+    data: dict = {"points": [[int(x), int(y)] for x, y in points]}
     if frame_shape:
         data["frame_w"] = frame_shape[1]
         data["frame_h"] = frame_shape[0]

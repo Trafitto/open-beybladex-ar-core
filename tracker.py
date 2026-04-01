@@ -798,6 +798,43 @@ class BeyTracker:
         out = [((int(c[0]) + ox, int(c[1]) + oy), int(c[2])) for c in circles[0]]
         return [c for c in out if self._inside_roi(c[0][0], c[0][1])]
 
+    def _detect_circles_hough_gray(
+        self,
+        gray: np.ndarray,
+        frame_shape: Tuple[int, ...],
+    ) -> List[Tuple[Tuple[int, int], int]]:
+        """HoughCircles on grayscale with relaxed params for low-contrast beys.
+
+        Uses lighter blur and a lower Canny threshold than the saturation
+        path so that subtle edges (metallic/transparent/white beys on a
+        white floor) are not suppressed.
+        """
+        h, w = frame_shape[:2]
+        min_dim = min(h, w)
+        min_radius = max(config.HOUGH_MIN_RADIUS, int(0.02 * min_dim))
+        max_radius = max(
+            min_radius + 1,
+            min(config.HOUGH_MAX_RADIUS, int(0.18 * min_dim)),
+        )
+        blur_k = tuple(getattr(config, "HOUGH_GRAY_BLUR_KSIZE", (7, 7)))
+        blur_s = float(getattr(config, "HOUGH_GRAY_BLUR_SIGMA", 1.5))
+        param1 = int(getattr(config, "HOUGH_GRAY_PARAM1", 50))
+        blurred = cv2.GaussianBlur(gray, blur_k, blur_s)
+        circles = cv2.HoughCircles(
+            blurred,
+            cv2.HOUGH_GRADIENT,
+            config.HOUGH_DP,
+            config.HOUGH_MIN_DIST,
+            param1=param1,
+            param2=config.HOUGH_PARAM2,
+            minRadius=min_radius,
+            maxRadius=max_radius,
+        )
+        if circles is None:
+            return []
+        out = [((int(c[0]), int(c[1])), int(c[2])) for c in circles[0]]
+        return [c for c in out if self._inside_roi(c[0][0], c[0][1])]
+
     # ------------------------------------------------------------------ #
     #  Contour-based detection                                              #
     # ------------------------------------------------------------------ #
@@ -894,6 +931,8 @@ class BeyTracker:
         self,
         channel: np.ndarray,
         frame_shape: Tuple[int, ...],
+        *,
+        gray: Optional[np.ndarray] = None,
     ) -> List[Tuple[Tuple[int, int], int]]:
         """Two-tier detection: fast ROI per tracked bey, full-frame fallback.
 
@@ -909,7 +948,7 @@ class BeyTracker:
         fallback_limit = int(getattr(config, "ROI_FALLBACK_FRAMES", 3))
 
         if not roi_enabled or roi_size <= 0 or not self._bey:
-            return self._detect_full_frame(channel, frame_shape)
+            return self._detect_full_frame(channel, frame_shape, gray=gray)
 
         nominal_dt = 1.0 / max(getattr(config, "TARGET_FPS", 60), 1)
         need_full_frame = len(self._bey) < config.MAX_BEY_COUNT
@@ -931,7 +970,7 @@ class BeyTracker:
         if not need_full_frame:
             return roi_circles
 
-        full_circles = self._detect_full_frame(channel, frame_shape)
+        full_circles = self._detect_full_frame(channel, frame_shape, gray=gray)
         if not roi_circles:
             return full_circles
 
@@ -948,11 +987,29 @@ class BeyTracker:
         self,
         channel: np.ndarray,
         frame_shape: Tuple[int, ...],
+        *,
+        gray: Optional[np.ndarray] = None,
     ) -> List[Tuple[Tuple[int, int], int]]:
-        """Run detection on the entire channel (original path)."""
+        """Run detection on the entire channel.
+
+        When using contour detection and fewer circles than MAX_BEY_COUNT are
+        found, falls back to HoughCircles on grayscale to catch
+        low-saturation beys that are invisible in the saturation channel.
+        """
         method = getattr(config, "DETECTION_METHOD", "hough")
         if method == "contour":
-            return self._detect_contours(channel, frame_shape)
+            circles = self._detect_contours(channel, frame_shape)
+            if gray is not None and len(circles) < config.MAX_BEY_COUNT:
+                hough_extra = self._detect_circles_hough_gray(gray, frame_shape)
+                dedup_dist = float(
+                    getattr(config, "CANDIDATE_MIN_SEPARATION", 28)
+                )
+                for c in hough_extra:
+                    if not any(
+                        distance(c[0], ec[0]) < dedup_dist for ec in circles
+                    ):
+                        circles.append(c)
+            return circles
         return self._detect_circles_hough(channel, frame_shape)
 
     # ------------------------------------------------------------------ #
@@ -980,17 +1037,38 @@ class BeyTracker:
 
         hues = hsv[:, :, 0][cmask]
         sats = hsv[:, :, 1][cmask]
+        vals = hsv[:, :, 2][cmask]
         if len(hues) == 0:
             return -1.0
 
+        val_min = int(getattr(config, "COLOR_VAL_MIN", 0))
         colored = sats >= config.COLOR_SAT_MIN
+        if val_min > 0:
+            colored = colored & (vals >= val_min)
         n_colored = int(np.sum(colored))
-        if n_colored < 5:
-            return -1.0
         min_fill = getattr(config, "COLOR_CENTER_MIN_FILL", 0.15)
-        if n_colored / len(sats) < min_fill:
-            return -1.0
-        return float(np.median(hues[colored]))
+        strict_ok = n_colored >= 5 and n_colored / len(sats) >= min_fill
+        if strict_ok:
+            return float(np.median(hues[colored]))
+
+        # Relaxed fallback: halve sat minimum to catch barely-colored beys
+        relaxed_sat = max(5, config.COLOR_SAT_MIN // 2)
+        relaxed = sats >= relaxed_sat
+        if val_min > 0:
+            relaxed = relaxed & (vals >= val_min)
+        n_relaxed = int(np.sum(relaxed))
+        if n_relaxed >= 5 and n_relaxed / len(sats) >= min_fill:
+            return float(np.median(hues[relaxed]))
+
+        # Last resort for colorless/metallic/transparent beys:
+        # use median hue of all bright-enough pixels regardless of saturation.
+        # Only accept when most of the center patch is bright (not dark noise).
+        bright_thresh = max(val_min, 30)
+        bright = vals >= bright_thresh
+        n_bright = int(np.sum(bright))
+        if n_bright >= 5 and n_bright / len(vals) >= 0.3:
+            return float(np.median(hues[bright]))
+        return -1.0
 
     # ------------------------------------------------------------------ #
     #  Motion check via frame differencing                                 #
@@ -1203,7 +1281,7 @@ class BeyTracker:
                     print(f"Learned rail hue from polygon: {self._rim_hue:.0f}")
 
         # --- 1. Detect bey candidates (ROI fast-path when tracking) ---
-        circles = self._detect_candidates(channel, frame.shape)
+        circles = self._detect_candidates(channel, frame.shape, gray=gray)
 
         # --- 2. Sample center color, reject rim-coloured circles ---
         all_candidates: List[Tuple[float, float, float, float]] = []
