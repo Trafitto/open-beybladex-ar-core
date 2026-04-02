@@ -47,9 +47,15 @@ def draw_debug_overlay(
         else "scanning..."
     )
     margin = max(collision_margin_px, 1)
+    raw_c = getattr(tracker, '_dbg_raw_circles', -1)
+    rej_rim = getattr(tracker, '_dbg_rejected_rim', 0)
+    rej_edge = getattr(tracker, '_dbg_rejected_edge', 0)
+    rej_hue = getattr(tracker, '_dbg_rejected_hue', 0)
+    rim_hue_val = getattr(tracker, '_rim_hue', -1)
     lines = [
         f"mode: {mode}",
-        f"detections: {tracker.get_last_circle_count()}",
+        f"detections: {tracker.get_last_circle_count()}  (contours={raw_c})",
+        f"rej: rim={rej_rim} edge={rej_edge} hue={rej_hue}  rim_hue={rim_hue_val:.0f}",
         f"frame {w}x{h} #{frame_index}",
         f"collisions: {collision_detector.event_count}",
         f"collision margin: {margin}px (magenta=zone, gray=bey)",
@@ -113,10 +119,11 @@ def draw_debug_overlay(
         overlay[rail_mask > 0] = (0, 128, 0)
         cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
 
+    blade_r = int(getattr(config, "BEY_BLADE_RADIUS_PX", 17))
     for b in tracker.get_states():
         cx, cy = int(b.position[0]), int(b.position[1])
-        r_bey = int(b.radius)
-        r_zone = int(b.radius + margin)
+        r_bey = blade_r
+        r_zone = blade_r + margin
         cv2.circle(frame, (cx, cy), r_bey, (180, 180, 180), 1)
         cv2.circle(frame, (cx, cy), r_zone, (255, 0, 255), 1)
 

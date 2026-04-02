@@ -16,6 +16,7 @@ def draw_overlay(
     *,
     colors: list[tuple[int, int, int]] | None = None,
     radius_scale: float = 1.4,
+    blade_radius_px: float = 17.0,
     velocity_color: tuple[int, int, int] = (0, 255, 255),
     impact_color: tuple[int, int, int] = (0, 0, 255),
     font_scale: float = 0.6,
@@ -29,7 +30,7 @@ def draw_overlay(
     for slot, b in enumerate(sorted_states):
         color = colors[b.id % 2]
         cx, cy = int(b.position[0]), int(b.position[1])
-        r = int(b.radius * radius_scale)
+        r = int(blade_radius_px * radius_scale)
         cv2.circle(frame, (cx, cy), r, color, 2)
         cv2.circle(frame, (cx, cy), 3, color, -1)
         vx, vy = b.velocity
@@ -78,6 +79,7 @@ def draw_overlay_from_config(
         impact_center,
         colors=[getattr(cfg, "COLOR_BEY_1", (0, 255, 0)), getattr(cfg, "COLOR_BEY_2", (255, 0, 0))],
         radius_scale=getattr(cfg, "BEY_RADIUS_SCALE", 1.4),
+        blade_radius_px=float(getattr(cfg, "BEY_BLADE_RADIUS_PX", 17)),
         velocity_color=getattr(cfg, "COLOR_VELOCITY", (0, 255, 255)),
         impact_color=getattr(cfg, "COLOR_IMPACT", (0, 0, 255)),
         font_scale=getattr(cfg, "FONT_SCALE", 0.6),

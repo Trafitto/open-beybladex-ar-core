@@ -330,6 +330,8 @@ class BeyTracker:
         self._next_id = 0
         self._last_circle_count = 0
         self._frame_index = 0
+        self._frame_w = 640
+        self._frame_h = 480
         self._bootstrapped = False
         self._frames_all_stuck = 0
         self._arena_roi: Optional[Tuple[int, int, int]] = None
@@ -344,6 +346,13 @@ class BeyTracker:
         self._rail_hue_learned: bool = False
         self._mm_per_pixel: float = 0.0
         self._roi_miss_count: Dict[int, int] = {}
+        self._bg_sub: Optional[Any] = None
+        if getattr(config, "BG_SUB_ENABLED", False):
+            history = int(getattr(config, "BG_SUB_HISTORY", 300))
+            var_thresh = float(getattr(config, "BG_SUB_VAR_THRESHOLD", 50))
+            self._bg_sub = cv2.createBackgroundSubtractorMOG2(
+                history=history, varThreshold=var_thresh, detectShadows=False
+            )
 
     # ------------------------------------------------------------------ #
     #  Arena ROI                                                          #
@@ -798,43 +807,6 @@ class BeyTracker:
         out = [((int(c[0]) + ox, int(c[1]) + oy), int(c[2])) for c in circles[0]]
         return [c for c in out if self._inside_roi(c[0][0], c[0][1])]
 
-    def _detect_circles_hough_gray(
-        self,
-        gray: np.ndarray,
-        frame_shape: Tuple[int, ...],
-    ) -> List[Tuple[Tuple[int, int], int]]:
-        """HoughCircles on grayscale with relaxed params for low-contrast beys.
-
-        Uses lighter blur and a lower Canny threshold than the saturation
-        path so that subtle edges (metallic/transparent/white beys on a
-        white floor) are not suppressed.
-        """
-        h, w = frame_shape[:2]
-        min_dim = min(h, w)
-        min_radius = max(config.HOUGH_MIN_RADIUS, int(0.02 * min_dim))
-        max_radius = max(
-            min_radius + 1,
-            min(config.HOUGH_MAX_RADIUS, int(0.18 * min_dim)),
-        )
-        blur_k = tuple(getattr(config, "HOUGH_GRAY_BLUR_KSIZE", (7, 7)))
-        blur_s = float(getattr(config, "HOUGH_GRAY_BLUR_SIGMA", 1.5))
-        param1 = int(getattr(config, "HOUGH_GRAY_PARAM1", 50))
-        blurred = cv2.GaussianBlur(gray, blur_k, blur_s)
-        circles = cv2.HoughCircles(
-            blurred,
-            cv2.HOUGH_GRADIENT,
-            config.HOUGH_DP,
-            config.HOUGH_MIN_DIST,
-            param1=param1,
-            param2=config.HOUGH_PARAM2,
-            minRadius=min_radius,
-            maxRadius=max_radius,
-        )
-        if circles is None:
-            return []
-        out = [((int(c[0]), int(c[1])), int(c[2])) for c in circles[0]]
-        return [c for c in out if self._inside_roi(c[0][0], c[0][1])]
-
     # ------------------------------------------------------------------ #
     #  Contour-based detection                                              #
     # ------------------------------------------------------------------ #
@@ -848,18 +820,32 @@ class BeyTracker:
     ) -> List[Tuple[Tuple[int, int], int]]:
         """Find bey candidates via thresholding + contour analysis.
 
-        Takes the same saturation channel as _detect_circles_hough and
-        returns the same format: list of ((cx, cy), radius).
-        When *offset* is non-zero, adds it to every coordinate before the
-        ROI check (used for detection on cropped sub-images).
+        Uses global threshold and optionally adaptive threshold (OR'd together)
+        to catch both strong and faint contrast objects.
+        Returns list of ((cx, cy), radius).
         """
-        threshold = int(getattr(config, "CONTOUR_SAT_THRESHOLD", 35))
+        threshold = int(getattr(config, "CONTOUR_THRESHOLD",
+                                       getattr(config, "CONTOUR_SAT_THRESHOLD", 35)))
         min_area = int(getattr(config, "CONTOUR_MIN_AREA", 150))
         max_area = int(getattr(config, "CONTOUR_MAX_AREA", 8000))
         min_circ = float(getattr(config, "CONTOUR_MIN_CIRCULARITY", 0.25))
         morph_k = int(getattr(config, "CONTOUR_MORPH_KSIZE", 5))
 
-        _, binary = cv2.threshold(channel, threshold, 255, cv2.THRESH_BINARY)
+        _, binary_global = cv2.threshold(channel, threshold, 255, cv2.THRESH_BINARY)
+
+        # Adaptive threshold: local contrast detection for faint objects
+        if getattr(config, "ADAPTIVE_THRESH_ENABLED", False):
+            block_size = int(getattr(config, "ADAPTIVE_THRESH_BLOCK", 51))
+            if block_size % 2 == 0:
+                block_size += 1
+            c_offset = int(getattr(config, "ADAPTIVE_THRESH_C", -15))
+            binary_adaptive = cv2.adaptiveThreshold(
+                channel, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, block_size, c_offset,
+            )
+            binary = cv2.bitwise_or(binary_global, binary_adaptive)
+        else:
+            binary = binary_global
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -869,9 +855,18 @@ class BeyTracker:
 
         ox, oy = offset
         out: List[Tuple[Tuple[int, int], int]] = []
+        dbg = config.DEBUG_PRINT and self._frame_index % 60 == 0
+        if dbg:
+            print(f"[contour] frame={self._frame_index} total_contours={len(contours)} "
+                  f"area=[{min_area},{max_area}] circ>={min_circ:.2f} offset={offset}")
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < min_area or area > max_area:
+                if dbg and area > 20:
+                    M = cv2.moments(cnt)
+                    ccx = int(M["m10"] / max(M["m00"], 1))
+                    ccy = int(M["m01"] / max(M["m00"], 1))
+                    print(f"  SKIP area={area:.0f} at ({ccx},{ccy})")
                 continue
 
             perimeter = cv2.arcLength(cnt, True)
@@ -879,6 +874,11 @@ class BeyTracker:
                 continue
             circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
             if circularity < min_circ:
+                if dbg:
+                    M = cv2.moments(cnt)
+                    ccx = int(M["m10"] / max(M["m00"], 1))
+                    ccy = int(M["m01"] / max(M["m00"], 1))
+                    print(f"  SKIP circ={circularity:.3f} area={area:.0f} at ({ccx},{ccy})")
                 continue
 
             M = cv2.moments(cnt)
@@ -888,10 +888,17 @@ class BeyTracker:
             cy = int(M["m01"] / M["m00"]) + oy
 
             radius = int(np.sqrt(area / np.pi))
+            inside = self._inside_roi(cx, cy)
 
-            if self._inside_roi(cx, cy):
+            if dbg:
+                print(f"  contour at ({cx},{cy}) r={radius} area={area:.0f} "
+                      f"circ={circularity:.3f} inside_roi={inside}")
+
+            if inside:
                 out.append(((cx, cy), radius))
 
+        if dbg:
+            print(f"  => {len(out)} circles passed")
         return out
 
     # ------------------------------------------------------------------ #
@@ -931,32 +938,25 @@ class BeyTracker:
         self,
         channel: np.ndarray,
         frame_shape: Tuple[int, ...],
-        *,
-        gray: Optional[np.ndarray] = None,
+        predictions: Optional[Dict[int, Tuple[float, float]]] = None,
     ) -> List[Tuple[Tuple[int, int], int]]:
         """Two-tier detection: fast ROI per tracked bey, full-frame fallback.
 
-        Tier 1 (fast): for each tracked bey, crop a small window around its
-        linearly-extrapolated position and detect only there.
-        Tier 2 (fallback): runs on the full frame when a ROI search misses
-        or when new bey discovery is needed.
-
-        Returns the combined, deduplicated list of circles.
+        Uses pre-computed Kalman/circular predictions for ROI positioning
+        (beys orbit in curves, linear extrapolation misses fast orbital motion).
         """
         roi_enabled = getattr(config, "ROI_ENABLED", False)
         roi_size = int(getattr(config, "ROI_SIZE", 0))
         fallback_limit = int(getattr(config, "ROI_FALLBACK_FRAMES", 3))
 
         if not roi_enabled or roi_size <= 0 or not self._bey:
-            return self._detect_full_frame(channel, frame_shape, gray=gray)
+            return self._detect_full_frame(channel, frame_shape)
 
-        nominal_dt = 1.0 / max(getattr(config, "TARGET_FPS", 60), 1)
         need_full_frame = len(self._bey) < config.MAX_BEY_COUNT
 
         roi_circles: List[Tuple[Tuple[int, int], int]] = []
         for b in self._bey:
-            pred_x = b.position[0] + b.velocity[0] * nominal_dt
-            pred_y = b.position[1] + b.velocity[1] * nominal_dt
+            pred_x, pred_y = (predictions or {}).get(b.id, b.position)
             found = self._detect_in_roi(channel, (pred_x, pred_y), roi_size)
             if found:
                 roi_circles.extend(found)
@@ -970,7 +970,7 @@ class BeyTracker:
         if not need_full_frame:
             return roi_circles
 
-        full_circles = self._detect_full_frame(channel, frame_shape, gray=gray)
+        full_circles = self._detect_full_frame(channel, frame_shape)
         if not roi_circles:
             return full_circles
 
@@ -987,29 +987,11 @@ class BeyTracker:
         self,
         channel: np.ndarray,
         frame_shape: Tuple[int, ...],
-        *,
-        gray: Optional[np.ndarray] = None,
     ) -> List[Tuple[Tuple[int, int], int]]:
-        """Run detection on the entire channel.
-
-        When using contour detection and fewer circles than MAX_BEY_COUNT are
-        found, falls back to HoughCircles on grayscale to catch
-        low-saturation beys that are invisible in the saturation channel.
-        """
+        """Run detection on the entire channel (original path)."""
         method = getattr(config, "DETECTION_METHOD", "hough")
         if method == "contour":
-            circles = self._detect_contours(channel, frame_shape)
-            if gray is not None and len(circles) < config.MAX_BEY_COUNT:
-                hough_extra = self._detect_circles_hough_gray(gray, frame_shape)
-                dedup_dist = float(
-                    getattr(config, "CANDIDATE_MIN_SEPARATION", 28)
-                )
-                for c in hough_extra:
-                    if not any(
-                        distance(c[0], ec[0]) < dedup_dist for ec in circles
-                    ):
-                        circles.append(c)
-            return circles
+            return self._detect_contours(channel, frame_shape)
         return self._detect_circles_hough(channel, frame_shape)
 
     # ------------------------------------------------------------------ #
@@ -1046,29 +1028,12 @@ class BeyTracker:
         if val_min > 0:
             colored = colored & (vals >= val_min)
         n_colored = int(np.sum(colored))
+        if n_colored < 5:
+            return -1.0
         min_fill = getattr(config, "COLOR_CENTER_MIN_FILL", 0.15)
-        strict_ok = n_colored >= 5 and n_colored / len(sats) >= min_fill
-        if strict_ok:
-            return float(np.median(hues[colored]))
-
-        # Relaxed fallback: halve sat minimum to catch barely-colored beys
-        relaxed_sat = max(5, config.COLOR_SAT_MIN // 2)
-        relaxed = sats >= relaxed_sat
-        if val_min > 0:
-            relaxed = relaxed & (vals >= val_min)
-        n_relaxed = int(np.sum(relaxed))
-        if n_relaxed >= 5 and n_relaxed / len(sats) >= min_fill:
-            return float(np.median(hues[relaxed]))
-
-        # Last resort for colorless/metallic/transparent beys:
-        # use median hue of all bright-enough pixels regardless of saturation.
-        # Only accept when most of the center patch is bright (not dark noise).
-        bright_thresh = max(val_min, 30)
-        bright = vals >= bright_thresh
-        n_bright = int(np.sum(bright))
-        if n_bright >= 5 and n_bright / len(vals) >= 0.3:
-            return float(np.median(hues[bright]))
-        return -1.0
+        if n_colored / len(sats) < min_fill:
+            return -1.0
+        return float(np.median(hues[colored]))
 
     # ------------------------------------------------------------------ #
     #  Motion check via frame differencing                                 #
@@ -1079,7 +1044,7 @@ class BeyTracker:
     ) -> bool:
         """True if there is local pixel change between current and previous frame."""
         if self._prev_gray is None:
-            return False
+            return True  # Allow registration when no prev frame (bootstrap)
         mult = getattr(config, "MOTION_PATCH_RADIUS_MULT", 1.0)
         r = max(int(radius * mult), 6)
         h, w = gray.shape
@@ -1102,11 +1067,12 @@ class BeyTracker:
     def _match_candidates(
         self,
         candidates: List[Tuple[float, float, float, float]],
+        predictions: Optional[Dict[int, Tuple[float, float]]] = None,
     ) -> Tuple[Dict[int, Tuple[float, float, float, float]], List[int]]:
-        """Match Hough candidates to tracked beys by position + identity hue.
+        """Match candidates to tracked beys by position + identity hue.
 
-        Uses Kalman prediction distance and identity hue to avoid swapping bey1/bey2
-        when they cross. Identity hue is sampled from center chip at first capture.
+        Uses pre-computed Kalman predictions (passed in) to avoid advancing
+        the filter twice per frame.
         """
         if not self._bey or not candidates:
             return {}, list(range(len(candidates)))
@@ -1119,7 +1085,7 @@ class BeyTracker:
 
         pairs: List[Tuple[float, int, int]] = []
         for bi, b in enumerate(self._bey):
-            pred = b.kalman_predict()
+            pred = predictions[b.id] if predictions and b.id in predictions else b.position
             max_dist = base_dist
             if fast_dist > 0 and b.speed >= fast_thresh:
                 max_dist = fast_dist
@@ -1128,10 +1094,17 @@ class BeyTracker:
                 d = distance((cx, cy), pred)
                 if d > max_dist:
                     continue
-                hd = _hue_distance(hue, identity_hue) if identity_hue >= 0 else 0
-                if max_drift > 0 and identity_hue >= 0 and hd > max_drift:
-                    continue
-                score = d + hd * identity_w
+                # Colorless candidates (hue < 0): skip hue checks, use
+                # position-only matching with a small penalty so colored
+                # candidates are preferred when both are available.
+                if hue < 0:
+                    hd = 0
+                    score = d + 10.0
+                else:
+                    hd = _hue_distance(hue, identity_hue) if identity_hue >= 0 else 0
+                    if max_drift > 0 and identity_hue >= 0 and hd > max_drift:
+                        continue
+                    score = d + hd * identity_w
                 if getattr(config, "PREFER_HIGH_PRIORITY", False) and self._arena_roi_high:
                     if self._inside_roi_high(cx, cy):
                         score -= 150
@@ -1236,33 +1209,46 @@ class BeyTracker:
     def update(self, frame: np.ndarray, dt: float) -> None:
         """One tracking cycle: Hough -> color -> match -> Kalman."""
         self._frame_index += 1
+        self._frame_h, self._frame_w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if getattr(config, "HOUGH_DETECTION_CHANNEL", "grayscale") == "saturation":
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            s = hsv[:, :, 1].astype(np.float32)
-            s *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
-            s = np.clip(s, 0, 255).astype(np.uint8)
-            floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
-            if floor > 0:
-                s = np.where(s >= floor, s, 0).astype(np.uint8)
-            use_clahe = (
-                getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False)
-                and getattr(config, "DETECTION_METHOD", "hough") != "contour"
-            )
-            if use_clahe:
-                clahe = cv2.createCLAHE(
-                    clipLimit=float(getattr(config, "HOUGH_SAT_CLAHE_CLIP", 2.5)),
-                    tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
+
+        # --- Build detection channel ---
+        # INV-GRAY: dark beys on white floor invert to bright blobs.
+        # Motion is used as boost-only (no static penalty) so that
+        # stationary beys remain detectable.  Static false positives
+        # are handled by _has_motion_at at registration and by
+        # ZERO_VELOCITY_CLEAR_FRAMES for ongoing tracks.
+        blur_k = getattr(config, "GAUSSIAN_BLUR_KSIZE", (9, 9))
+        blur_s = float(getattr(config, "GAUSSIAN_BLUR_SIGMA", 2.0))
+        channel = cv2.GaussianBlur(cv2.bitwise_not(gray), blur_k, blur_s)
+
+        # Exclude rail + eroded rim
+        if self._rail_mask is not None:
+            channel[self._rail_mask > 0] = 0
+            rim_erode = int(getattr(config, "CONTOUR_RIM_ERODE", 15))
+            if rim_erode > 0:
+                ek = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (rim_erode * 2 + 1, rim_erode * 2 + 1)
                 )
-                s = clahe.apply(s)
-            if self._rail_mask is not None:
-                s[self._rail_mask > 0] = 0
-            dome_mask = self._build_dome_mask(hsv, s)
-            if dome_mask is not None:
-                s[dome_mask > 0] = 0
-            channel = s
-        else:
-            channel = gray
+                eroded = cv2.dilate(self._rail_mask, ek, iterations=1)
+                channel[eroded > 0] = 0
+
+        # Motion boost: amplify moving pixels without penalizing static ones
+        if getattr(config, "MOTION_MASK_ENABLED", False) and self._prev_gray is not None:
+            diff = cv2.absdiff(gray, self._prev_gray)
+            diff = cv2.GaussianBlur(diff, (5, 5), 0)
+            mot_thresh = int(getattr(config, "MOTION_MASK_THRESHOLD", 25))
+            _, motion = cv2.threshold(diff, mot_thresh, 255, cv2.THRESH_BINARY)
+            mot_dilate = int(getattr(config, "MOTION_MASK_DILATE", 10))
+            if mot_dilate > 0:
+                dk = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (mot_dilate * 2 + 1, mot_dilate * 2 + 1)
+                )
+                motion = cv2.dilate(motion, dk, iterations=1)
+            boost = float(getattr(config, "MOTION_MASK_BOOST", 1.3))
+            ch_f = channel.astype(np.float32)
+            ch_f[motion > 0] *= boost
+            channel = np.clip(ch_f, 0, 255).astype(np.uint8)
 
         if (
             self._rail_mask is not None
@@ -1280,22 +1266,33 @@ class BeyTracker:
                 if config.DEBUG_PRINT:
                     print(f"Learned rail hue from polygon: {self._rim_hue:.0f}")
 
-        # --- 1. Detect bey candidates (ROI fast-path when tracking) ---
-        circles = self._detect_candidates(channel, frame.shape, gray=gray)
+        # --- 0. Kalman predict ONCE for all tracked beys ---
+        # Store predictions upfront; used for both ROI positioning and matching.
+        predictions: Dict[int, Tuple[float, float]] = {}
+        for b in self._bey:
+            predictions[b.id] = b.kalman_predict()
 
-        # --- 2. Sample center color, reject rim-coloured circles ---
-        all_candidates: List[Tuple[float, float, float, float]] = []
+        # --- 1. Detect bey candidates (ROI fast-path when tracking) ---
+        circles = self._detect_candidates(channel, frame.shape, predictions)
+        self._dbg_raw_circles = len(circles)
+
+        # --- 2. Sample center color, build candidate lists ---
+        colored_candidates: List[Tuple[float, float, float, float]] = []
+        colorless_candidates: List[Tuple[float, float, float, float]] = []
+        self._dbg_rejected_rim = 0
+        self._dbg_rejected_edge = 0
+        self._dbg_rejected_hue = 0
+        dbg = config.DEBUG_PRINT and self._frame_index % 60 == 0
+
+        if dbg:
+            print(f"[candidates] circles={len(circles)} tracked={len(self._bey)} "
+                  f"rim_hue={self._rim_hue:.0f}")
+
         for (cx, cy), r in circles:
-            hue = self._sample_center_color(frame, cx, cy, r)
-            if hue < 0:
-                continue
-            if self._rim_hue >= 0:
-                if _hue_distance(hue, self._rim_hue) < config.COLOR_MIN_HUE_SEPARATION:
-                    continue
-            reject_ranges = getattr(config, "REJECT_HUE_RANGES", [])
-            if any(lo <= hue <= hi for lo, hi in reject_ranges):
-                continue
             if self._near_rim(cx, cy):
+                self._dbg_rejected_rim += 1
+                if dbg:
+                    print(f"  ({cx},{cy}) r={r} REJECT near_rim")
                 continue
             if self._near_polygon_edge(cx, cy):
                 if getattr(config, "RAIL_TRACKING_ALLOW_EDGE", False) and self._bey:
@@ -1304,10 +1301,47 @@ class BeyTracker:
                         distance((cx, cy), b.position) < max_dist for b in self._bey
                     )
                     if not near_tracked:
+                        self._dbg_rejected_edge += 1
+                        if dbg:
+                            print(f"  ({cx},{cy}) r={r} REJECT near_edge (not near tracked)")
                         continue
                 else:
+                    self._dbg_rejected_edge += 1
+                    if dbg:
+                        print(f"  ({cx},{cy}) r={r} REJECT near_edge")
                     continue
-            all_candidates.append((float(cx), float(cy), float(r), hue))
+
+            hue = self._sample_center_color(frame, cx, cy, r)
+            if hue < 0:
+                colorless_candidates.append(
+                    (float(cx), float(cy), float(r), -1.0)
+                )
+                if dbg:
+                    print(f"  ({cx},{cy}) r={r} COLORLESS")
+                continue
+            # Skip rim-hue rejection when polygon is set: the polygon
+            # already excludes the rail area, so this filter is redundant.
+            # Under the PS3 Eye's warm color temperature the rail and bey
+            # stickers share similar hues, causing all candidates to be
+            # incorrectly rejected.
+            if self._rim_hue >= 0 and self._polygon_points is None:
+                if _hue_distance(hue, self._rim_hue) < config.COLOR_MIN_HUE_SEPARATION:
+                    self._dbg_rejected_hue += 1
+                    if dbg:
+                        print(f"  ({cx},{cy}) r={r} REJECT hue={hue:.0f} "
+                              f"too close to rim_hue={self._rim_hue:.0f}")
+                    continue
+            reject_ranges = getattr(config, "REJECT_HUE_RANGES", [])
+            if any(lo <= hue <= hi for lo, hi in reject_ranges):
+                self._dbg_rejected_hue += 1
+                if dbg:
+                    print(f"  ({cx},{cy}) r={r} REJECT hue={hue:.0f} in reject range")
+                continue
+            colored_candidates.append((float(cx), float(cy), float(r), hue))
+            if dbg:
+                print(f"  ({cx},{cy}) r={r} COLORED hue={hue:.0f}")
+
+        all_candidates = colored_candidates + colorless_candidates
 
         # Deduplicate: overlapping circles = same physical bey, keep one
         min_sep = getattr(config, "CANDIDATE_MIN_SEPARATION", 28)
@@ -1333,22 +1367,29 @@ class BeyTracker:
             candidates = all_candidates
         self._last_circle_count = len(candidates)
 
-        # --- 3. Kalman predict for all tracked beys ---
-        for b in self._bey:
-            b.kalman_predict()
-
-        # --- 4. Match candidates to tracked beys ---
-        matched, unmatched_indices = self._match_candidates(candidates)
+        # --- 3. Match candidates to tracked beys ---
+        # (predictions were computed once in step 0)
+        matched, unmatched_indices = self._match_candidates(
+            candidates, predictions
+        )
 
         # --- 5. Update tracked beys ---
+        max_accel = float(getattr(config, "MATCH_MAX_ACCELERATION", 0))
         for b in self._bey:
             if b.id in matched:
                 cx, cy, r, hue = matched[b.id]
+                # Reject matches that create implausible velocity jumps
+                if max_accel > 0 and dt > 0:
+                    new_speed = distance((cx, cy), b.position) / dt
+                    speed_change = abs(new_speed - b.speed)
+                    if speed_change > max_accel and b.frames_since_seen == 0:
+                        b.keep_previous_position()
+                        continue
                 b.update_from_raw((cx, cy), r, dt)
-                if config.COLOR_ADAPT_RATE > 0:
+                if hue >= 0 and config.COLOR_ADAPT_RATE > 0:
                     self._blend_color(b, hue)
                 bootstrap_frames = getattr(config, "IDENTITY_BOOTSTRAP_FRAMES", 0)
-                if bootstrap_frames > 0 and b.id in self._identity_bootstrap:
+                if hue >= 0 and bootstrap_frames > 0 and b.id in self._identity_bootstrap:
                     samples = self._identity_bootstrap[b.id]
                     samples.append(hue)
                     if len(samples) >= bootstrap_frames:
@@ -1374,6 +1415,15 @@ class BeyTracker:
                 if len(self._bey) >= config.MAX_BEY_COUNT:
                     break
                 cx, cy, r, hue = candidates[ci]
+                has_color = hue >= 0
+                has_motion = self._has_motion_at(gray, int(cx), int(cy), r)
+
+                # Require at least one form of evidence: color or motion.
+                # - Colored center chip → real bey (even if static/placed)
+                # - Local pixel motion  → real bey (even if metallic/colorless)
+                # - Neither             → static false positive, skip
+                if not has_color and not has_motion:
+                    continue
 
                 # Must be far enough from every already-tracked bey
                 too_close = False
@@ -1515,7 +1565,7 @@ class BeyTracker:
                 self._roi_miss_count.pop(b.id, None)
             self._bey = self._bey[: config.MAX_BEY_COUNT]
 
-        # --- 7. Drop beys lost, stationary, or outside polygon ---
+        # --- 7. Drop beys lost, stationary, or outside bounds ---
         max_drop = getattr(config, "MAX_RECOVERY_FRAMES", 20)
         overlap_dist = float(getattr(config, "OVERLAP_RECOVERY_DISTANCE", 0))
         zero_vel_frames = int(getattr(config, "ZERO_VELOCITY_CLEAR_FRAMES", 0))
@@ -1523,7 +1573,12 @@ class BeyTracker:
         matched_ids = set(matched.keys())
         dropped_ids = set()
         for b in self._bey:
-            if self._polygon_points is not None and not self._inside_roi(b.position[0], b.position[1]):
+            bx, by = b.position
+            if bx < 0 or bx >= self._frame_w or by < 0 or by >= self._frame_h:
+                dropped_ids.add(b.id)
+                if config.DEBUG_PRINT:
+                    print(f"Dropped bey#{b.id}: out of frame ({bx:.0f},{by:.0f})")
+            elif self._polygon_points is not None and not self._inside_roi(bx, by):
                 dropped_ids.add(b.id)
                 if config.DEBUG_PRINT:
                     print(f"Dropped bey#{b.id}: outside polygon (stuck on rail)")

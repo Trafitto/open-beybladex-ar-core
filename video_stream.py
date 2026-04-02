@@ -35,23 +35,32 @@ _V4L2_CTL = shutil.which("v4l2-ctl")
 
 # Primary name -> alternate names used by older kernel builds of gspca_ov534
 _ALT_NAMES: dict[str, tuple[str, ...]] = {
-    "auto_white_balance": ("awb",),
+    "gain_automatic": ("autogain",),
+    "white_balance_automatic": ("auto_white_balance", "awb"),
     "red_balance": ("redblc",),
     "blue_balance": ("blueblc",),
+    "horizontal_flip": ("hflip",),
+    "vertical_flip": ("vflip",),
 }
 
+# Auto controls MUST come before their manual counterparts:
+# gain_automatic must be set to 0 before gain becomes writable,
+# auto_exposure must be set to 1 (Manual) before exposure becomes writable.
 _PS3EYE_CTRL_MAP: list[tuple[str, str]] = [
-    ("autogain",            "PS3EYE_AUTOGAIN"),
-    ("auto_white_balance",  "PS3EYE_AUTO_WHITE_BALANCE"),
-    ("exposure",            "PS3EYE_EXPOSURE"),
-    ("gain",                "PS3EYE_GAIN"),
-    ("brightness",          "PS3EYE_BRIGHTNESS"),
-    ("contrast",            "PS3EYE_CONTRAST"),
-    ("sharpness",           "PS3EYE_SHARPNESS"),
-    ("red_balance",         "PS3EYE_RED_BALANCE"),
-    ("blue_balance",        "PS3EYE_BLUE_BALANCE"),
-    ("hflip",               "PS3EYE_HFLIP"),
-    ("vflip",               "PS3EYE_VFLIP"),
+    ("gain_automatic",            "PS3EYE_AUTOGAIN"),
+    ("auto_exposure",             "PS3EYE_AUTO_EXPOSURE"),
+    ("white_balance_automatic",   "PS3EYE_AUTO_WHITE_BALANCE"),
+    ("exposure",                  "PS3EYE_EXPOSURE"),
+    ("gain",                      "PS3EYE_GAIN"),
+    ("brightness",                "PS3EYE_BRIGHTNESS"),
+    ("contrast",                  "PS3EYE_CONTRAST"),
+    ("saturation",                "PS3EYE_SATURATION_HW"),
+    ("sharpness",                 "PS3EYE_SHARPNESS"),
+    ("red_balance",               "PS3EYE_RED_BALANCE"),
+    ("blue_balance",              "PS3EYE_BLUE_BALANCE"),
+    ("horizontal_flip",           "PS3EYE_HFLIP"),
+    ("vertical_flip",             "PS3EYE_VFLIP"),
+    ("power_line_frequency",      "PS3EYE_POWER_LINE_FREQ"),
 ]
 
 

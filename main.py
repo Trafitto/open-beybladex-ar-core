@@ -127,7 +127,8 @@ def _run_main_loop(
         positions = [b.position for b in states]
         velocities = [b.velocity for b in states]
         collision_margin = max(getattr(config, "BEY_COLLISION_MARGIN_PX", 2), 1)
-        radii = [b.radius + collision_margin for b in states]
+        blade_r = float(getattr(config, "BEY_BLADE_RADIUS_PX", 17))
+        radii = [blade_r + collision_margin for _ in states]
 
         predicted_velocities = [
             getattr(b, "predicted_velocity", None) for b in states
@@ -207,6 +208,7 @@ def _run_main_loop(
                 collision_detector.event_count,
                 collision_event=collision_event,
                 radius_scale=config.BEY_RADIUS_SCALE,
+                blade_radius_px=blade_r,
                 identities=identities,
                 mm_per_pixel=tracker.mm_per_pixel,
                 arena_center_px=arena_center,
@@ -233,26 +235,49 @@ def _run_main_loop(
             out_writer.write(frame)
 
         if args.debug and raw_frame is not None:
-            hsv_dbg = cv2.cvtColor(processed, cv2.COLOR_BGR2HSV)
-            sat_ch = hsv_dbg[:, :, 1].astype(np.float32)
-            sat_ch *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
-            sat_ch = np.clip(sat_ch, 0, 255).astype(np.uint8)
-            sat_floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
-            if sat_floor > 0:
-                sat_ch = np.where(sat_ch >= sat_floor, sat_ch, 0).astype(np.uint8)
-            thresh = int(getattr(config, "CONTOUR_SAT_THRESHOLD", 90))
-            _, binary = cv2.threshold(sat_ch, thresh, 255, cv2.THRESH_BINARY)
-            sat_color = cv2.applyColorMap(sat_ch, cv2.COLORMAP_JET)
-            binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-            det_view = np.vstack([sat_color, binary_bgr])
-            det_view = cv2.resize(det_view, (frame.shape[1], frame.shape[0]),
-                                  interpolation=cv2.INTER_AREA)
+            thresh = int(getattr(config, "CONTOUR_THRESHOLD",
+                                 getattr(config, "CONTOUR_SAT_THRESHOLD", 90)))
+            rail_mask = tracker.get_rail_mask()
+
+            # Mirror the tracker's simplified detection channel
+            dbg_gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            blur_k = getattr(config, "GAUSSIAN_BLUR_KSIZE", (9, 9))
+            blur_s = float(getattr(config, "GAUSSIAN_BLUR_SIGMA", 2.0))
+            det_ch = cv2.GaussianBlur(cv2.bitwise_not(dbg_gray), blur_k, blur_s)
+
+            if rail_mask is not None:
+                det_ch[rail_mask > 0] = 0
+                rim_erode = int(getattr(config, "CONTOUR_RIM_ERODE", 15))
+                if rim_erode > 0:
+                    ek = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (rim_erode * 2 + 1, rim_erode * 2 + 1))
+                    eroded = cv2.dilate(rail_mask, ek, iterations=1)
+                    det_ch[eroded > 0] = 0
+
+            _, binary = cv2.threshold(det_ch, thresh, 255, cv2.THRESH_BINARY)
+
             def _label(img, text, y=18):
                 cv2.putText(img, text, (10, y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
                 cv2.putText(img, text, (10, y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
-            _label(det_view, f"SATURATION (top) + THRESHOLD>{thresh} (bottom)")
+
+            heat_color = cv2.applyColorMap(det_ch, cv2.COLORMAP_JET)
+            binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+            det_view = np.vstack([heat_color, binary_bgr])
+            fh, fw = frame.shape[:2]
+            det_view = cv2.resize(det_view, (fw, fh),
+                                  interpolation=cv2.INTER_AREA)
+            # Show pipeline diagnostics
+            raw_c = getattr(tracker, '_dbg_raw_circles', 0)
+            rej_rim = getattr(tracker, '_dbg_rejected_rim', 0)
+            rej_edge = getattr(tracker, '_dbg_rejected_edge', 0)
+            rej_hue = getattr(tracker, '_dbg_rejected_hue', 0)
+            rim_hue = getattr(tracker, '_rim_hue', -1)
+            _label(det_view, f"INV-GRAY (top) + THRESHOLD>{thresh} (bottom)")
+            _label(det_view,
+                   f"contours={raw_c} rej:rim={rej_rim} edge={rej_edge} hue={rej_hue} rim_hue={rim_hue:.0f}",
+                   y=36)
             _label(frame, "CAMERA + OVERLAY")
             combined = np.hstack([det_view, frame])
             cv2.imshow("Beyblade X Arena", combined)

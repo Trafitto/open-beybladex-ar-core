@@ -30,6 +30,7 @@ def build_tracking_data(
     collision_count: int = 0,
     collision_event=None,
     radius_scale: float = 1.4,
+    blade_radius_px: float = 17.0,
     identities: Optional[list[str]] = None,
     mm_per_pixel: float = 0.0,
     arena_center_px: tuple[float, float] | None = None,
@@ -78,7 +79,7 @@ def build_tracking_data(
             "vx": round(vx_px, 2),
             "vy": round(vy_px, 2),
             "speed": round(speed_px, 2),
-            "radius": round(b.radius * radius_scale, 2),
+            "radius": round(blade_radius_px * radius_scale, 2),
             "kineticEnergy": round(ke_px, 2),
         }
 
@@ -95,7 +96,7 @@ def build_tracking_data(
             dx = x - acx
             dy = y - acy
             dist = math.sqrt(dx * dx + dy * dy)
-            bey_r_px = b.radius
+            bey_r_px = blade_radius_px
             wall_hit = (dist + bey_r_px) >= (arena_radius_px - wall_tol_px)
         entry["wallHit"] = wall_hit
 
