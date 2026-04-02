@@ -1064,28 +1064,33 @@ class BeyTracker:
         """Hue used for identity matching; color_hue_origin once bootstrap done."""
         return b.color_hue_origin if b.color_hue_origin >= 0 else b.color_hue
 
-    def _match_candidates(
+    def _build_cost_matrix(
         self,
         candidates: List[Tuple[float, float, float, float]],
         predictions: Optional[Dict[int, Tuple[float, float]]] = None,
-    ) -> Tuple[Dict[int, Tuple[float, float, float, float]], List[int]]:
-        """Match candidates to tracked beys by position + identity hue.
+    ) -> List[List[float]]:
+        """Build cost matrix for bey-candidate assignment.
 
-        Uses pre-computed Kalman predictions (passed in) to avoid advancing
-        the filter twice per frame.
+        Returns cost[bi][ci] where inf means infeasible (distance or hue
+        constraints violated).
         """
-        if not self._bey or not candidates:
-            return {}, list(range(len(candidates)))
-
         base_dist = getattr(config, "MATCH_MAX_DISTANCE", 200)
         fast_dist = getattr(config, "MATCH_MAX_DISTANCE_FAST", 0)
         fast_thresh = float(getattr(config, "MATCH_FAST_SPEED_THRESHOLD", 40))
         identity_w = getattr(config, "MATCH_IDENTITY_WEIGHT", 4.0)
         max_drift = getattr(config, "IDENTITY_HUE_MAX_DRIFT", 0)
 
-        pairs: List[Tuple[float, int, int]] = []
+        n_beys = len(self._bey)
+        n_cands = len(candidates)
+        INF = float("inf")
+        cost = [[INF] * n_cands for _ in range(n_beys)]
+
         for bi, b in enumerate(self._bey):
-            pred = predictions[b.id] if predictions and b.id in predictions else b.position
+            pred = (
+                predictions[b.id]
+                if predictions and b.id in predictions
+                else b.position
+            )
             max_dist = base_dist
             if fast_dist > 0 and b.speed >= fast_thresh:
                 max_dist = fast_dist
@@ -1094,21 +1099,79 @@ class BeyTracker:
                 d = distance((cx, cy), pred)
                 if d > max_dist:
                     continue
-                # Colorless candidates (hue < 0): skip hue checks, use
-                # position-only matching with a small penalty so colored
-                # candidates are preferred when both are available.
                 if hue < 0:
-                    hd = 0
                     score = d + 10.0
                 else:
-                    hd = _hue_distance(hue, identity_hue) if identity_hue >= 0 else 0
+                    hd = (
+                        _hue_distance(hue, identity_hue)
+                        if identity_hue >= 0
+                        else 0
+                    )
                     if max_drift > 0 and identity_hue >= 0 and hd > max_drift:
                         continue
                     score = d + hd * identity_w
-                if getattr(config, "PREFER_HIGH_PRIORITY", False) and self._arena_roi_high:
+                if (
+                    getattr(config, "PREFER_HIGH_PRIORITY", False)
+                    and self._arena_roi_high
+                ):
                     if self._inside_roi_high(cx, cy):
                         score -= 150
-                pairs.append((score, bi, ci))
+                cost[bi][ci] = score
+
+        return cost
+
+    def _match_candidates(
+        self,
+        candidates: List[Tuple[float, float, float, float]],
+        predictions: Optional[Dict[int, Tuple[float, float]]] = None,
+    ) -> Tuple[Dict[int, Tuple[float, float, float, float]], List[int]]:
+        """Match candidates to tracked beys by position + identity hue.
+
+        Uses optimal assignment for 2 beys (brute-force over all candidate
+        pairs) to prevent the "wrong bey matches first" problem that greedy
+        sort-and-assign can produce when beys are close together.  Falls
+        back to greedy for 1 bey or when no complete 2-bey assignment exists.
+        """
+        if not self._bey or not candidates:
+            return {}, list(range(len(candidates)))
+
+        n_beys = len(self._bey)
+        n_cands = len(candidates)
+        INF = float("inf")
+
+        cost = self._build_cost_matrix(candidates, predictions)
+
+        # --- Optimal 2-bey assignment ----------------------------------
+        if n_beys == 2 and n_cands >= 2:
+            best_total = INF
+            best_assign: Optional[Tuple[int, int]] = None
+            for c0 in range(n_cands):
+                if cost[0][c0] >= INF:
+                    continue
+                for c1 in range(n_cands):
+                    if c1 == c0 or cost[1][c1] >= INF:
+                        continue
+                    total = cost[0][c0] + cost[1][c1]
+                    if total < best_total:
+                        best_total = total
+                        best_assign = (c0, c1)
+
+            if best_assign is not None:
+                c0, c1 = best_assign
+                matched = {
+                    self._bey[0].id: candidates[c0],
+                    self._bey[1].id: candidates[c1],
+                }
+                used = {c0, c1}
+                unmatched = [i for i in range(n_cands) if i not in used]
+                return matched, unmatched
+
+        # --- Greedy fallback (1 bey, or no valid 2-bey assignment) -----
+        pairs: List[Tuple[float, int, int]] = []
+        for bi in range(n_beys):
+            for ci in range(n_cands):
+                if cost[bi][ci] < INF:
+                    pairs.append((cost[bi][ci], bi, ci))
 
         pairs.sort()
 
