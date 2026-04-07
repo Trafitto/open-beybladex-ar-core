@@ -6,15 +6,11 @@ Real-time tracking system for a Beyblade X arena: detects up to 2 beyblades via 
 
 ### Demo videos
 
-The first demo shows the tracking output with the debug overlay enabled. The second demo shows the same tracker with simple visual effects applied for testing.
+This is the result (still in WIP):
 
-![Demo 1](demo/demo1.gif)
-![Demo 2](demo/demo2.gif)
+![WIP demo](demo/demo_wip.gif)
 
-The core tracker broadcasts bey position, velocity and collision events to the sibling project `open_beybladex_ar_web` via WebSocket (`-w`). That project renders the SFX overlay and projection in the browser. The video below shows the output captured from the web client.
-![Demo 2](demo/test_video_output.gif)
 
-[See more demo on YouTube](https://www.youtube.com/playlist?list=PLrNs8uiECbXatd9XZKk8QShOT4uTjQlCy)
 
 ## Requirements
 
@@ -212,3 +208,17 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 ## Web SFX Projection
 
 Sibling project [open_beybladex_ar_web](https://github.com/Trafitto/open-beybladex-ar-web) provides a browser-based SFX output for projection. Run the core with `-w`/`--web` to broadcast tracking data via WebSocket. See the web project's README for setup.
+
+![Web SFX WIP demo](demo/demo_wip.gif)
+
+## Early demos
+
+The first demo shows the tracking output with the debug overlay enabled. The second demo shows the same tracker with simple visual effects applied for testing.
+
+![Demo 1](demo/demo1.gif)
+![Demo 2](demo/demo2.gif)
+
+The core tracker broadcasts bey position, velocity and collision events to the sibling project `open_beybladex_ar_web` via WebSocket (`-w`). That project renders the SFX overlay and projection in the browser. The video below shows the output captured from the web client.
+![Demo 2](demo/test_video_output.gif)
+
+[See more demo on YouTube](https://www.youtube.com/playlist?list=PLrNs8uiECbXatd9XZKk8QShOT4uTjQlCy)
