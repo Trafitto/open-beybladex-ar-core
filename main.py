@@ -6,6 +6,7 @@ Use -s/--save to write the overlay output to output/videos/.
 Use -d/--debug to show tuning info overlay.
 Use -e/--effect to enable trail SFX under each bey.
 Use -w/--web to broadcast tracking data via WebSocket for open_beybladex_ar_web SFX projection.
+Use -c/--config to manually configure the arena (red zone + rail mask).
 """
 import argparse
 import os
@@ -319,14 +320,9 @@ def main() -> None:
     parser.add_argument("-w", "--web", action="store_true", help="Broadcast tracking data via WebSocket")
     parser.add_argument("-a", "--arena", action="store_true", help="Manually select the arena ROI on the first frame")
     parser.add_argument(
-        "-rm", "--rail-mask",
+        "-c", "--config",
         action="store_true",
-        help="Manually select rail mask: click points along the green rail (8-12 pts), then [c]"
-    )
-    parser.add_argument(
-        "-rz", "--red-zone",
-        action="store_true",
-        help="Manually select red zone: click center, then edge of circle, then [c]"
+        help="Manually configure arena: select red zone (center + edge) then rail mask polygon (8-12 pts along rail)"
     )
     args = parser.parse_args()
 
@@ -359,7 +355,7 @@ def main() -> None:
     tracker = BeyTracker()
     collision_detector = CollisionDetector()
 
-    needs_calibration = args.red_zone or args.rail_mask
+    needs_calibration = args.config
 
     if is_live and needs_calibration:
         first_frame = _live_preview(cap, proc_w=proc_w, proc_h=proc_h)
@@ -382,7 +378,7 @@ def main() -> None:
     setup_arena_roi(tracker, first_frame, manual=args.arena)
 
     red_zone_file = getattr(config, "RED_ZONE_POINTS_FILE", "output/red_zone.json")
-    if args.red_zone:
+    if args.config:
         red_zone = select_red_zone(first_frame)
         if red_zone:
             cx, cy, r = red_zone
@@ -399,7 +395,7 @@ def main() -> None:
             print(f"Red zone loaded: center=({cx},{cy}) r={r}")
 
     points_file = getattr(config, "RAIL_MASK_POINTS_FILE", "output/rail_mask_points.json")
-    if args.rail_mask:
+    if args.config:
         points = select_rail_mask_points(first_frame)
         if points:
             save_rail_mask_points(points_file, points, frame_shape=first_frame.shape)
@@ -417,7 +413,7 @@ def main() -> None:
             if tracker.build_rail_mask(first_frame):
                 print("Rail mask built from first frame (green rail region masked)")
             else:
-                print("Rail mask build failed; run with -rm to define polygon")
+                print("Rail mask build failed; run with -c to define polygon")
 
     pocket_angle = tracker.detect_pocket_angle()
 

@@ -56,8 +56,7 @@ CLI arguments:
 | `-e` | Trail/impact effects |
 | `-w` | WebSocket for `open_beybladex_ar_web` SFX projection |
 | `-a` | Manually select arena ROI |
-| `-rm` | Manually select rail mask polygon (click along inner edge of rail) |
-| `-rz` | Manually select red zone (high-priority circle: center + edge, saved to `RED_ZONE_POINTS_FILE`) |
+| `-c` | Configure arena: select red zone (center + edge) then rail mask polygon (8-12 pts along rail) |
 
 ### Mask preview tools
 
@@ -71,7 +70,7 @@ The rail mask zeroes saturation in the green arena border region before Hough de
 
 *Rail mask example: white = excluded (green rail); black = tracking area*
 
-- **Define manually** with `-rm`: click 8–12 points along the inner edge of the rail, then `[c]` to confirm. Points saved to `RAIL_MASK_POINTS_FILE`.
+- **Define manually** with `-c`: click 20 points along the inner edge of the rail, then `[c]` to confirm. Points saved to `RAIL_MASK_POINTS_FILE`.
 - **Preview**:
 
 ```bash
@@ -172,7 +171,7 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 | **REJECT_HUE_RANGES** | Add more hue ranges to exclude (e.g. `[(35, 95)]` for green rail) | Fewer exclusions; set `[]` to disable (needed for green beys) |
 | **REJECT_NEAR_RIM_FRACTION** | Reject circles in outer X of arena; 0.10 = outer 10% (green rail zone) | 0 = disabled; lower = allow beys nearer rim |
 | **RAIL_MASK_ENABLED** | Zero S in green rail region before Hough (stadium is static) | False = no rail mask |
-| **RAIL_MASK_POINTS_FILE** | JSON file for polygon points; load when exists, recreate with `-rm` | `output/rail_mask_points.json` |
+| **RAIL_MASK_POINTS_FILE** | JSON file for polygon points; load when exists, recreate with `-c` | `output/rail_mask_points.json` |
 | **POLYGON_EDGE_MARGIN** | Reject circles within N px of polygon edge (rail reflections); 0 = disabled | 18 |
 | **DOME_GLARE_ENABLED** | Zero S in specular spots (plastic dome reflections) before Hough | True |
 | **DOME_GLARE_V_MIN** | V above this = potential glare; lower = catch more | 200 |
