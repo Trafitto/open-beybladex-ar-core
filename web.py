@@ -36,6 +36,7 @@ def build_tracking_data(
     arena_center_px: tuple[float, float] | None = None,
     arena_radius_px: float = 0.0,
     wall_hit_tolerance_mm: float = 15.0,
+    pocket_angle_rad: float | None = None,
 ) -> dict:
     """
     Build JSON-serializable tracking payload for WebSocket clients.
@@ -59,10 +60,23 @@ def build_tracking_data(
     id_list = identities or []
     wall_hit_idx_set = set(wall_hits) if wall_hits else set()
 
+    # When the arena is known, normalize to the stadium circle so the web
+    # projection maps 1:1 to the physical stadium (camera and projector have
+    # different viewpoints; frame-relative coords would be misaligned).
+    use_arena = has_arena and arena_radius_px > 0
+    acx_n, acy_n, ar_n = 0.0, 0.0, 0.0
+    if use_arena:
+        acx_n, acy_n = arena_center_px
+        ar_n = arena_radius_px
+
     for slot, b in enumerate(sorted_states):
         x, y = b.position[0], b.position[1]
-        nx = x / frame_w if frame_w > 0 else 0
-        ny = y / frame_h if frame_h > 0 else 0
+        if use_arena:
+            nx = (x - acx_n) / (2 * ar_n) + 0.5
+            ny = (y - acy_n) / (2 * ar_n) + 0.5
+        else:
+            nx = x / frame_w if frame_w > 0 else 0
+            ny = y / frame_h if frame_h > 0 else 0
         identity = id_list[slot] if slot < len(id_list) else ""
 
         speed_px = b.speed
@@ -104,11 +118,18 @@ def build_tracking_data(
 
     icx, icy = impact_center[0], impact_center[1]
 
+    if use_arena:
+        ic_nx = (icx - acx_n) / (2 * ar_n) + 0.5
+        ic_ny = (icy - acy_n) / (2 * ar_n) + 0.5
+    else:
+        ic_nx = icx / frame_w if frame_w > 0 else 0
+        ic_ny = icy / frame_h if frame_h > 0 else 0
+
     impact_data: dict = {
         "x": round(icx, 2),
         "y": round(icy, 2),
-        "nx": round(icx / frame_w, 4) if frame_w > 0 else 0,
-        "ny": round(icy / frame_h, 4) if frame_h > 0 else 0,
+        "nx": round(ic_nx, 4),
+        "ny": round(ic_ny, 4),
     }
 
     if collision_event is not None:
@@ -122,7 +143,7 @@ def build_tracking_data(
         if scale > 0:
             impact_data["relativeSpeedMmS"] = round(rel_speed * scale, 2)
 
-    return {
+    payload: dict = {
         "frameWidth": frame_w,
         "frameHeight": frame_h,
         "mmPerPixel": round(scale, 6) if scale > 0 else None,
@@ -131,7 +152,14 @@ def build_tracking_data(
         "impactCenter": impact_data,
         "wallHits": wall_hits or [],
         "collisionCount": collision_count,
+        "stadiumRelative": use_arena,
     }
+    if use_arena:
+        payload["arenaCenterPx"] = [round(acx_n, 2), round(acy_n, 2)]
+        payload["arenaRadiusPx"] = round(ar_n, 2)
+    if pocket_angle_rad is not None:
+        payload["pocketAngleRad"] = round(pocket_angle_rad, 4)
+    return payload
 
 
 def run_websocket_server(

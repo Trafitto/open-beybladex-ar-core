@@ -77,6 +77,7 @@ def _run_main_loop(
     *,
     args,
     is_live: bool,
+    pocket_angle_rad: float | None = None,
 ) -> None:
     video_fps = cap.get(cv2.CAP_PROP_FPS) if not is_live else None
     # For video files: frame delay handled by cv2.waitKey(delay_ms)
@@ -214,6 +215,7 @@ def _run_main_loop(
                 arena_center_px=arena_center,
                 arena_radius_px=tracker.get_arena_radius_px(),
                 wall_hit_tolerance_mm=getattr(config, "WALL_HIT_TOLERANCE_MM", 15.0),
+                pocket_angle_rad=pocket_angle_rad,
             )
             push_tracking_web(data, ws_setter)
 
@@ -417,10 +419,12 @@ def main() -> None:
             else:
                 print("Rail mask build failed; run with -rm to define polygon")
 
+    pocket_angle = tracker.detect_pocket_angle()
+
     if not is_live:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    _run_main_loop(cap, tracker, collision_detector, args=args, is_live=is_live)
+    _run_main_loop(cap, tracker, collision_detector, args=args, is_live=is_live, pocket_angle_rad=pocket_angle)
 
 
 if __name__ == "__main__":

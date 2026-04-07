@@ -542,6 +542,67 @@ class BeyTracker:
         """Return the rail mask if built (for debug overlay)."""
         return self._rail_mask
 
+    def detect_pocket_angle(self) -> Optional[float]:
+        """Find the pocket angle by locating the largest gap in the green rail.
+
+        Samples the rail mask along the annulus in 1-degree steps and finds the
+        widest arc with no green pixels. Returns the angle (radians, 0 = right,
+        CCW) pointing at the center of the gap, or None if no clear gap is found.
+        """
+        if self._rail_mask is None:
+            return None
+        stadium = self._rim_circle or self._arena_roi_low or self._arena_roi
+        if stadium is None:
+            return None
+        rcx, rcy, rr = stadium
+        sample_r = int(rr * 0.90)
+        n_samples = 360
+        counts = np.zeros(n_samples, dtype=np.int32)
+        band = 4
+        for i in range(n_samples):
+            angle = 2 * np.pi * i / n_samples
+            cx = int(rcx + sample_r * np.cos(angle))
+            cy = int(rcy + sample_r * np.sin(angle))
+            h, w = self._rail_mask.shape[:2]
+            y1 = max(0, cy - band)
+            y2 = min(h, cy + band + 1)
+            x1 = max(0, cx - band)
+            x2 = min(w, cx + band + 1)
+            patch = self._rail_mask[y1:y2, x1:x2]
+            counts[i] = int(np.sum(patch > 0))
+
+        is_gap = counts < np.max(counts) * 0.15
+        best_start = 0
+        best_len = 0
+        run_start = -1
+        for i in range(n_samples * 2):
+            idx = i % n_samples
+            if is_gap[idx]:
+                if run_start < 0:
+                    run_start = i
+            else:
+                if run_start >= 0:
+                    run_len = i - run_start
+                    if run_len > best_len:
+                        best_len = run_len
+                        best_start = run_start
+                    run_start = -1
+        if run_start >= 0:
+            run_len = n_samples * 2 - run_start
+            if run_len > best_len:
+                best_len = run_len
+                best_start = run_start
+
+        min_gap_deg = float(getattr(config, "POCKET_MIN_GAP_DEG", 10))
+        gap_deg = best_len * 360.0 / n_samples
+        if gap_deg < min_gap_deg:
+            return None
+        center_idx = (best_start + best_len / 2.0) % n_samples
+        angle = 2 * np.pi * center_idx / n_samples
+        if config.DEBUG_PRINT:
+            print(f"Pocket detected at {np.degrees(angle):.1f} deg (gap={gap_deg:.1f} deg)")
+        return float(angle)
+
     def set_rail_mask_from_polygon(
         self,
         frame_shape: Tuple[int, ...],
