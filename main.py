@@ -7,6 +7,7 @@ Use -d/--debug to show tuning info overlay.
 Use -e/--effect to enable trail SFX under each bey.
 Use -w/--web to broadcast tracking data via WebSocket for open_beybladex_ar_web SFX projection.
 Use -c/--config to manually configure the arena (red zone + rail mask).
+Use -l/--low-light to apply a low-light preset (higher exposure/gain, relaxed thresholds).
 """
 import argparse
 import os
@@ -324,7 +325,27 @@ def main() -> None:
         action="store_true",
         help="Manually configure arena: select red zone (center + edge) then rail mask polygon (8-12 pts along rail)"
     )
+    parser.add_argument(
+        "-l", "--low-light",
+        action="store_true",
+        help="Apply low-light preset: higher exposure/gain, aggressive CLAHE, relaxed thresholds"
+    )
     args = parser.parse_args()
+
+    if args.low_light:
+        overrides = {
+            "PS3EYE_EXPOSURE": 120,
+            "PS3EYE_GAIN": 50,
+            "PS3EYE_BRIGHTNESS": 180,
+            "HSV_CLAHE_CLIP": 3.5,
+            "CONTOUR_THRESHOLD": 40,
+            "COLOR_SAT_MIN": 10,
+            "COLOR_VAL_MIN": 10,
+            "DOME_GLARE_V_MIN": 220,
+        }
+        for key, val in overrides.items():
+            setattr(config, key, val)
+        print("Low-light preset applied:", ", ".join(f"{k}={v}" for k, v in overrides.items()))
 
     proc_w = getattr(config, "PROCESS_WIDTH", 0)
     proc_h = getattr(config, "PROCESS_HEIGHT", 0)

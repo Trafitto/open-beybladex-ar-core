@@ -57,6 +57,7 @@ CLI arguments:
 | `-w` | WebSocket for `open_beybladex_ar_web` SFX projection |
 | `-a` | Manually select arena ROI |
 | `-c` | Configure arena: select red zone (center + edge) then rail mask polygon (8-12 pts along rail) |
+| `-l` | Low-light preset: higher exposure/gain, aggressive CLAHE, relaxed detection thresholds |
 
 ### Mask preview tools
 
