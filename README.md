@@ -209,7 +209,6 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 
 Sibling project [open_beybladex_ar_web](https://github.com/Trafitto/open-beybladex-ar-web) provides a browser-based SFX output for projection. Run the core with `-w`/`--web` to broadcast tracking data via WebSocket. See the web project's README for setup.
 
-![Web SFX WIP demo](demo/demo_wip.gif)
 
 ## Early demos
 
