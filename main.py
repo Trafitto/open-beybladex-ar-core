@@ -339,6 +339,7 @@ def main() -> None:
             "PS3EYE_BRIGHTNESS": 180,
             "HSV_CLAHE_CLIP": 3.5,
             "CONTOUR_THRESHOLD": 40,
+            "ADAPTIVE_THRESH_ENABLED": True,
             "COLOR_SAT_MIN": 10,
             "COLOR_VAL_MIN": 10,
             "DOME_GLARE_V_MIN": 220,
