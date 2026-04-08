@@ -32,6 +32,25 @@ def check_collision(
     return distance(center1, center2) < (r1 + r2)
 
 
+def compute_closing_speed(
+    pos0: Tuple[float, float],
+    pos1: Tuple[float, float],
+    vel0: Tuple[float, float],
+    vel1: Tuple[float, float],
+) -> float:
+    """Closing speed: projection of relative velocity onto the center-to-center
+    axis.  Positive means the beys are approaching; negative means separating."""
+    dx = pos1[0] - pos0[0]
+    dy = pos1[1] - pos0[1]
+    d = np.sqrt(dx * dx + dy * dy)
+    if d < 1e-6:
+        return 0.0
+    ux, uy = dx / d, dy / d
+    rvx = vel0[0] - vel1[0]
+    rvy = vel0[1] - vel1[1]
+    return float(rvx * ux + rvy * uy)
+
+
 def _velocity_direction_changed(
     v_obs: Tuple[float, float],
     v_pred: Tuple[float, float],
@@ -97,13 +116,20 @@ class CollisionEvent:
     relative_speed: float
     impact_force: float
     frame: int
+    closing_speed: float = 0.0
 
 
 class CollisionDetector:
-    """Detects bey-bey collisions with debouncing and impact force estimation.
+    """Detects bey-bey collisions with multi-layer validation.
 
-    Prevents rapid-fire collision events when two beys overlap for multiple
-    frames by enforcing a cooldown period after each detected impact.
+    Filters:
+      1. Circle overlap (geometry)
+      2. Leading-edge debounce + cooldown
+      3. Closing speed (beys must be approaching, not passing by)
+      4. Minimum overlap depth (rejects edge-grazing from tilt wobble)
+      5. Minimum relative speed
+      6. Optional Kalman velocity-reversal confirmation
+      7. Radius stability (rejects when detected radius jumps -- tilt artifact)
     """
 
     def __init__(self) -> None:
@@ -111,6 +137,7 @@ class CollisionDetector:
         self._last_overlapping: bool = False
         self._events: List[CollisionEvent] = []
         self._frame: int = 0
+        self._prev_radii: List[float] = []
 
     def update(
         self,
@@ -119,11 +146,13 @@ class CollisionDetector:
         velocities: List[Tuple[float, float]],
         frame_index: int,
         predicted_velocities: Optional[List[Optional[Tuple[float, float]]]] = None,
+        detected_radii: Optional[List[float]] = None,
     ) -> Optional[CollisionEvent]:
-        """Check for a collision this frame. Returns a CollisionEvent on the
-        leading edge of an overlap (i.e. the first frame of contact after
-        cooldown expires), or None. When COLLISION_KALMAN_CONFIRM is True,
-        also requires velocity direction change (reflection) from Kalman prediction.
+        """Check for a collision this frame.
+
+        *detected_radii*: the tracker's raw detected radius for each bey
+        (distinct from the fixed collision radii).  Used to reject tilt
+        artifacts where the apparent radius spikes.
         """
         self._frame = frame_index
 
@@ -141,14 +170,51 @@ class CollisionDetector:
 
         if not overlapping:
             self._last_overlapping = False
+            if detected_radii and len(detected_radii) >= 2:
+                self._prev_radii = list(detected_radii[:2])
             return None
 
-        # Only trigger on the leading edge (transition from no-overlap to
-        # overlap) and when cooldown has expired.
         if self._last_overlapping or self._cooldown_remaining > 0:
             self._last_overlapping = overlapping
             return None
 
+        # -- Filter: closing speed (must be approaching) --
+        v0 = velocities[0] if len(velocities) > 0 else (0.0, 0.0)
+        v1 = velocities[1] if len(velocities) > 1 else (0.0, 0.0)
+        closing = compute_closing_speed(positions[0], positions[1], v0, v1)
+        min_closing = float(getattr(
+            config, "COLLISION_MIN_CLOSING_SPEED", 15.0
+        ))
+        if closing < min_closing:
+            self._last_overlapping = overlapping
+            return None
+
+        # -- Filter: minimum overlap depth --
+        d = distance(positions[0], positions[1])
+        overlap_depth = (radii[0] + radii[1]) - d
+        min_overlap = float(getattr(config, "COLLISION_MIN_OVERLAP_PX", 3.0))
+        if overlap_depth < min_overlap:
+            self._last_overlapping = overlapping
+            return None
+
+        # -- Filter: radius stability (tilt detection) --
+        max_radius_jump = float(getattr(
+            config, "COLLISION_MAX_RADIUS_JUMP", 0.5
+        ))
+        if (detected_radii and len(detected_radii) >= 2
+                and self._prev_radii and len(self._prev_radii) >= 2):
+            for i in range(2):
+                prev_r = self._prev_radii[i]
+                curr_r = detected_radii[i]
+                if prev_r > 0:
+                    ratio = abs(curr_r - prev_r) / prev_r
+                    if ratio > max_radius_jump:
+                        self._last_overlapping = overlapping
+                        if detected_radii:
+                            self._prev_radii = list(detected_radii[:2])
+                        return None
+
+        # -- Filter: Kalman velocity reversal --
         use_kalman_confirm = getattr(config, "COLLISION_KALMAN_CONFIRM", False)
         if use_kalman_confirm and predicted_velocities and len(predicted_velocities) >= 2:
             preds = predicted_velocities[:2]
@@ -158,30 +224,26 @@ class CollisionDetector:
                 self._last_overlapping = overlapping
                 return None
 
-        self._last_overlapping = True
-        self._cooldown_remaining = getattr(
-            config, "COLLISION_COOLDOWN_FRAMES", 12
-        )
-
-        # Relative velocity between the two beys
-        v0 = velocities[0] if len(velocities) > 0 else (0.0, 0.0)
-        v1 = velocities[1] if len(velocities) > 1 else (0.0, 0.0)
+        # -- Filter: minimum relative speed --
         rel_vx = v0[0] - v1[0]
         rel_vy = v0[1] - v1[1]
         relative_speed = float(np.sqrt(rel_vx ** 2 + rel_vy ** 2))
-
-        min_approach = getattr(config, "COLLISION_MIN_APPROACH_SPEED", 30.0)
+        min_approach = float(getattr(config, "COLLISION_MIN_APPROACH_SPEED", 40.0))
         if relative_speed < min_approach:
+            self._last_overlapping = overlapping
             return None
 
-        # Impact point: midpoint between the two centers
+        # -- Collision confirmed --
+        self._last_overlapping = True
+        self._cooldown_remaining = int(getattr(
+            config, "COLLISION_COOLDOWN_FRAMES", 15
+        ))
+        if detected_radii and len(detected_radii) >= 2:
+            self._prev_radii = list(detected_radii[:2])
+
         impact_x = (positions[0][0] + positions[1][0]) / 2.0
         impact_y = (positions[0][1] + positions[1][1]) / 2.0
-
-        # Impact force: proportional to relative speed and the overlap depth
-        d = distance(positions[0], positions[1])
-        overlap = (radii[0] + radii[1]) - d
-        impact_force = relative_speed * max(overlap, 1.0)
+        impact_force = relative_speed * max(overlap_depth, 1.0)
 
         event = CollisionEvent(
             bey_id_a=0,
@@ -190,6 +252,7 @@ class CollisionDetector:
             relative_speed=relative_speed,
             impact_force=impact_force,
             frame=frame_index,
+            closing_speed=closing,
         )
         self._events.append(event)
         return event

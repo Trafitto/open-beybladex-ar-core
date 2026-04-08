@@ -5,7 +5,42 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from typing import Callable, Optional
+
+
+def _build_reference_markers(
+    pocket_angle_rad: float | None = None,
+) -> list[dict]:
+    """Build named reference points in stadium-normalized (nx, ny) space.
+
+    These anchors let the web projection overlay verify alignment against
+    the physical stadium: center, cardinal rim points, an inner ring for
+    scale verification, and the pocket if detected.
+    """
+    import math
+
+    markers: list[dict] = [
+        {"name": "center", "nx": 0.5, "ny": 0.5},
+        {"name": "rimTop", "nx": 0.5, "ny": 0.0},
+        {"name": "rimBottom", "nx": 0.5, "ny": 1.0},
+        {"name": "rimLeft", "nx": 0.0, "ny": 0.5},
+        {"name": "rimRight", "nx": 1.0, "ny": 0.5},
+    ]
+    for i in range(8):
+        a = i * math.pi / 4
+        markers.append({
+            "name": f"inner{i}",
+            "nx": round(0.5 + 0.25 * math.cos(a), 4),
+            "ny": round(0.5 + 0.25 * math.sin(a), 4),
+        })
+    if pocket_angle_rad is not None:
+        markers.append({
+            "name": "pocket",
+            "nx": round(0.5 + 0.5 * math.cos(pocket_angle_rad), 4),
+            "ny": round(0.5 + 0.5 * math.sin(pocket_angle_rad), 4),
+        })
+    return markers
 
 
 def _normalize_force(raw_force: float, max_force: float = 5000.0) -> float:
@@ -153,6 +188,8 @@ def build_tracking_data(
         "wallHits": wall_hits or [],
         "collisionCount": collision_count,
         "stadiumRelative": use_arena,
+        "timestamp": round(time.time(), 6),
+        "referenceMarkers": _build_reference_markers(pocket_angle_rad),
     }
     if use_arena:
         payload["arenaCenterPx"] = [round(acx_n, 2), round(acy_n, 2)]
@@ -183,8 +220,9 @@ def run_websocket_server(
         except ImportError:
             from websockets import serve
 
-    latest: dict = {"json": None}
     clients: set = set()
+    loop_ref: dict = {"loop": None}
+    new_data_event: dict = {"event": None}
 
     async def register(ws):
         clients.add(ws)
@@ -193,11 +231,12 @@ def run_websocket_server(
         finally:
             clients.discard(ws)
 
-    async def broadcast_loop():
+    async def broadcast_loop(event: asyncio.Event):
         last = None
         while True:
-            await asyncio.sleep(1 / 60)
-            payload = latest.get("json")
+            await event.wait()
+            event.clear()
+            payload = latest_ref.get("json")
             if payload is not None and payload != last:
                 last = payload
                 dead = []
@@ -209,13 +248,21 @@ def run_websocket_server(
                 for c in dead:
                     clients.discard(c)
 
+    latest_ref: dict = {"json": None}
+
     async def main():
+        event = asyncio.Event()
+        new_data_event["event"] = event
         async with serve(register, host, port):
-            asyncio.create_task(broadcast_loop())
+            asyncio.create_task(broadcast_loop(event))
             await asyncio.Future()
 
     def set_latest(s: str):
-        latest["json"] = s
+        latest_ref["json"] = s
+        evt = new_data_event.get("event")
+        lo = loop_ref.get("loop")
+        if evt is not None and lo is not None:
+            lo.call_soon_threadsafe(evt.set)
 
     push_tracking_web._default_setter = set_latest
     if on_set_latest:
@@ -225,6 +272,7 @@ def run_websocket_server(
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            loop_ref["loop"] = loop
             loop.run_until_complete(main())
         except Exception as e:
             print(f"WebSocket server error: {e}", file=sys.stderr)

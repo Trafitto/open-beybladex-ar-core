@@ -136,6 +136,7 @@ class WebcamVideoStream:
                 self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             if height > 0:
                 self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             apply_ps3eye_settings(src)
 
         self._lock = threading.Lock()

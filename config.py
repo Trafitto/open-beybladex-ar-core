@@ -243,7 +243,7 @@ BEY_RADIUS_SCALE = 1.4
 BEY_IDENTITIES = ["Blader 1", "Blader 2"]   # e.g. ["Player 1", "Player 2"] or ["Dragon", "Phoenix"]
 # Collision: margin extended from each bey circle; overlap of two zones = impact
 # Minimum 1px used when 0. With -d, gray=circle, magenta=zone.
-BEY_COLLISION_MARGIN_PX = 10
+BEY_COLLISION_MARGIN_PX = 5
 
 # Color sampling -- detects coloured bey chips against the white floor
 # COLOR_SAMPLE_RADIUS_FRAC: fraction of circle radius to sample at center
@@ -361,14 +361,22 @@ KALMAN_MAX_VELOCITY_PX = 50
 
 # Collision detection
 # COLLISION_COOLDOWN_FRAMES: min frames between collision events
-# COLLISION_MIN_APPROACH_SPEED: min combined approach speed (px/frame) to trigger
+# COLLISION_MIN_APPROACH_SPEED: min relative speed (px/frame) magnitude to trigger
+# COLLISION_MIN_CLOSING_SPEED: min approach speed along center-to-center axis;
+#   positive = approaching. Rejects parallel fly-bys and tilt-induced overlap.
+# COLLISION_MIN_OVERLAP_PX: min overlap depth in pixels; rejects edge-grazing
+# COLLISION_MAX_RADIUS_JUMP: max fractional radius change between frames (0-1);
+#   rejects tilt artifacts where the detected circle inflates suddenly
 # COLLISION_KALMAN_CONFIRM: when True, require velocity direction change vs Kalman
 #   prediction (reflection) to confirm impact; reduces false positives
 # COLLISION_VELOCITY_REVERSAL_MIN_SPEED: min speed (px/frame) to check direction
 # COLLISION_VELOCITY_REVERSAL_COS: cos(angle) threshold; < 0.5 = > 60 deg deflection
-COLLISION_COOLDOWN_FRAMES = 5
-COLLISION_MIN_APPROACH_SPEED = 20.0
-COLLISION_KALMAN_CONFIRM = False
+COLLISION_COOLDOWN_FRAMES = 15
+COLLISION_MIN_APPROACH_SPEED = 40.0
+COLLISION_MIN_CLOSING_SPEED = 15.0
+COLLISION_MIN_OVERLAP_PX = 3.0
+COLLISION_MAX_RADIUS_JUMP = 0.5
+COLLISION_KALMAN_CONFIRM = True
 COLLISION_VELOCITY_REVERSAL_MIN_SPEED = 5.0
 COLLISION_VELOCITY_REVERSAL_COS = 0.5
 

@@ -18,6 +18,8 @@ from datetime import datetime
 import cv2
 import numpy as np
 
+cv2.setNumThreads(os.cpu_count() or 4)
+
 import config
 from arena import setup_arena_roi
 from video_stream import WebcamVideoStream, is_live_source
@@ -132,6 +134,7 @@ def _run_main_loop(
         collision_margin = max(getattr(config, "BEY_COLLISION_MARGIN_PX", 2), 1)
         blade_r = float(getattr(config, "BEY_BLADE_RADIUS_PX", 17))
         radii = [blade_r + collision_margin for _ in states]
+        detected_radii = [b.radius for b in states]
 
         predicted_velocities = [
             getattr(b, "predicted_velocity", None) for b in states
@@ -142,6 +145,7 @@ def _run_main_loop(
             velocities,
             frame_index,
             predicted_velocities=predicted_velocities,
+            detected_radii=detected_radii,
         )
         collision = collision_event is not None
 
@@ -149,7 +153,8 @@ def _run_main_loop(
             print(
                 f"IMPACT #{collision_detector.event_count} "
                 f"force={collision_event.impact_force:.0f} "
-                f"speed={collision_event.relative_speed:.0f}"
+                f"speed={collision_event.relative_speed:.0f} "
+                f"closing={collision_event.closing_speed:.0f}"
             )
 
         if collision and collision_event is not None:

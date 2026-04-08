@@ -6,6 +6,17 @@ from typing import Any
 import cv2
 import numpy as np
 
+_clahe_cache: dict = {"clip": None, "tile": None, "obj": None}
+
+
+def _get_clahe(clip: float, tile: tuple[int, int]) -> cv2.CLAHE:
+    """Return a cached CLAHE object, only recreating when parameters change."""
+    if _clahe_cache["clip"] != clip or _clahe_cache["tile"] != tile:
+        _clahe_cache["clip"] = clip
+        _clahe_cache["tile"] = tile
+        _clahe_cache["obj"] = cv2.createCLAHE(clipLimit=clip, tileGridSize=tile)
+    return _clahe_cache["obj"]
+
 
 def preprocess_frame_hsv(
     frame: np.ndarray,
@@ -25,7 +36,7 @@ def preprocess_frame_hsv(
         return frame
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=clahe_tile)
+    clahe = _get_clahe(clahe_clip, clahe_tile)
     hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
 
     if sat_scale != 1.0:

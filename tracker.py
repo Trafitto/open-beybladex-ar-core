@@ -342,7 +342,9 @@ class BeyTracker:
         self._prev_gray: Optional[np.ndarray] = None
         self._identity_bootstrap: Dict[int, List[float]] = {}
         self._rail_mask: Optional[np.ndarray] = None
+        self._rail_mask_combined: Optional[np.ndarray] = None
         self._polygon_points: Optional[List[Tuple[int, int]]] = None
+        self._polygon_np: Optional[np.ndarray] = None
         self._rail_hue_learned: bool = False
         self._mm_per_pixel: float = 0.0
         self._roi_miss_count: Dict[int, int] = {}
@@ -353,6 +355,27 @@ class BeyTracker:
             self._bg_sub = cv2.createBackgroundSubtractorMOG2(
                 history=history, varThreshold=var_thresh, detectShadows=False
             )
+        # Pre-allocated buffers for the per-frame pipeline (sized on first use)
+        self._buf_gray: Optional[np.ndarray] = None
+        self._buf_gray_prev: Optional[np.ndarray] = None
+        self._buf_channel_f32: Optional[np.ndarray] = None
+        self._buf_motion_kernel: Optional[np.ndarray] = None
+        self._buf_motion_kernel_size: int = 0
+
+    def _precompute_rail_mask_combined(self) -> None:
+        """Build a combined rail+eroded-rim mask once (the rail mask is static)."""
+        if self._rail_mask is None:
+            self._rail_mask_combined = None
+            return
+        rim_erode = int(getattr(config, "CONTOUR_RIM_ERODE", 15))
+        if rim_erode > 0:
+            ek = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (rim_erode * 2 + 1, rim_erode * 2 + 1)
+            )
+            eroded = cv2.dilate(self._rail_mask, ek, iterations=1)
+            self._rail_mask_combined = cv2.bitwise_or(self._rail_mask, eroded)
+        else:
+            self._rail_mask_combined = self._rail_mask
 
     # ------------------------------------------------------------------ #
     #  Arena ROI                                                          #
@@ -457,9 +480,8 @@ class BeyTracker:
         return 0.0
 
     def _inside_roi(self, x: float, y: float) -> bool:
-        if self._polygon_points is not None:
-            pts = np.array(self._polygon_points, dtype=np.int32)
-            return cv2.pointPolygonTest(pts, (float(x), float(y)), False) >= 0
+        if self._polygon_np is not None:
+            return cv2.pointPolygonTest(self._polygon_np, (float(x), float(y)), False) >= 0
         roi = self._arena_roi_low if self._arena_roi_low else self._arena_roi
         if roi is None:
             return True
@@ -474,13 +496,12 @@ class BeyTracker:
 
     def _near_polygon_edge(self, x: float, y: float) -> bool:
         """True if (x,y) is inside polygon but within margin px of the edge (rail reflections)."""
-        if self._polygon_points is None:
+        if self._polygon_np is None:
             return False
         margin = float(getattr(config, "POLYGON_EDGE_MARGIN", 0))
         if margin <= 0:
             return False
-        pts = np.array(self._polygon_points, dtype=np.int32)
-        dist = cv2.pointPolygonTest(pts, (float(x), float(y)), True)
+        dist = cv2.pointPolygonTest(self._polygon_np, (float(x), float(y)), True)
         return 0 < dist < margin
 
     def _near_rim(self, x: float, y: float) -> bool:
@@ -529,6 +550,7 @@ class BeyTracker:
         if np.sum(rail > 0) < 100:
             return False
         self._rail_mask = rail
+        self._precompute_rail_mask_combined()
         save_path = getattr(config, "RAIL_MASK_SAVE_PATH", "")
         if save_path:
             parent = os.path.dirname(save_path)
@@ -618,10 +640,11 @@ class BeyTracker:
             return False
         h, w = frame_shape[:2]
         self._polygon_points = list(points)
+        self._polygon_np = np.array(points, dtype=np.int32)
         play_area = np.zeros((h, w), dtype=np.uint8)
-        pts = np.array(points, dtype=np.int32)
-        cv2.fillPoly(play_area, [pts], 255)
+        cv2.fillPoly(play_area, [self._polygon_np], 255)
         self._rail_mask = np.where(play_area > 0, 0, 255).astype(np.uint8)
+        self._precompute_rail_mask_combined()
         self._recompute_mm_per_pixel()
         if save_path:
             parent = os.path.dirname(save_path)
@@ -1334,28 +1357,26 @@ class BeyTracker:
         """One tracking cycle: Hough -> color -> match -> Kalman."""
         self._frame_index += 1
         self._frame_h, self._frame_w = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        fh, fw = self._frame_h, self._frame_w
+        if self._buf_gray is None or self._buf_gray.shape != (fh, fw):
+            self._buf_gray = np.empty((fh, fw), dtype=np.uint8)
+            self._buf_gray_prev = np.empty((fh, fw), dtype=np.uint8)
+            self._buf_channel_f32 = np.empty((fh, fw), dtype=np.float32)
+            self._prev_gray = None
+
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY, dst=self._buf_gray)
+        gray = self._buf_gray
 
         # --- Build detection channel ---
-        # INV-GRAY: dark beys on white floor invert to bright blobs.
-        # Motion is used as boost-only (no static penalty) so that
-        # stationary beys remain detectable.  Static false positives
-        # are handled by _has_motion_at at registration and by
-        # ZERO_VELOCITY_CLEAR_FRAMES for ongoing tracks.
         blur_k = getattr(config, "GAUSSIAN_BLUR_KSIZE", (9, 9))
         blur_s = float(getattr(config, "GAUSSIAN_BLUR_SIGMA", 2.0))
-        channel = cv2.GaussianBlur(cv2.bitwise_not(gray), blur_k, blur_s)
+        inv = cv2.bitwise_not(gray)
+        channel = cv2.GaussianBlur(inv, blur_k, blur_s)
 
-        # Exclude rail + eroded rim
-        if self._rail_mask is not None:
-            channel[self._rail_mask > 0] = 0
-            rim_erode = int(getattr(config, "CONTOUR_RIM_ERODE", 15))
-            if rim_erode > 0:
-                ek = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (rim_erode * 2 + 1, rim_erode * 2 + 1)
-                )
-                eroded = cv2.dilate(self._rail_mask, ek, iterations=1)
-                channel[eroded > 0] = 0
+        # Exclude rail + eroded rim (using pre-computed combined mask)
+        if self._rail_mask_combined is not None:
+            channel[self._rail_mask_combined > 0] = 0
 
         # Motion boost: amplify moving pixels without penalizing static ones
         if getattr(config, "MOTION_MASK_ENABLED", False) and self._prev_gray is not None:
@@ -1365,14 +1386,18 @@ class BeyTracker:
             _, motion = cv2.threshold(diff, mot_thresh, 255, cv2.THRESH_BINARY)
             mot_dilate = int(getattr(config, "MOTION_MASK_DILATE", 10))
             if mot_dilate > 0:
-                dk = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (mot_dilate * 2 + 1, mot_dilate * 2 + 1)
-                )
-                motion = cv2.dilate(motion, dk, iterations=1)
+                if self._buf_motion_kernel_size != mot_dilate:
+                    self._buf_motion_kernel = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (mot_dilate * 2 + 1, mot_dilate * 2 + 1)
+                    )
+                    self._buf_motion_kernel_size = mot_dilate
+                motion = cv2.dilate(motion, self._buf_motion_kernel, iterations=1)
             boost = float(getattr(config, "MOTION_MASK_BOOST", 1.3))
-            ch_f = channel.astype(np.float32)
-            ch_f[motion > 0] *= boost
-            channel = np.clip(ch_f, 0, 255).astype(np.uint8)
+            np.copyto(self._buf_channel_f32, channel, casting='unsafe')
+            motion_mask = motion > 0
+            self._buf_channel_f32[motion_mask] *= boost
+            np.clip(self._buf_channel_f32, 0, 255, out=self._buf_channel_f32)
+            np.copyto(channel, self._buf_channel_f32, casting='unsafe')
 
         if (
             self._rail_mask is not None
@@ -1735,6 +1760,8 @@ class BeyTracker:
 
         if not self._bey:
             self._bootstrapped = False
+            self._prev_gray = self._buf_gray
+            self._buf_gray, self._buf_gray_prev = self._buf_gray_prev, self._buf_gray
             return
 
         # --- 8. Stuck detection ---
@@ -1754,8 +1781,9 @@ class BeyTracker:
             if config.DEBUG_PRINT:
                 print(f"All beys stuck for {max_stuck} frames -- clearing")
 
-        # Store for next frame's motion check
-        self._prev_gray = gray.copy()
+        # Swap gray buffers for next frame's motion check (avoids copy)
+        self._prev_gray = self._buf_gray
+        self._buf_gray, self._buf_gray_prev = self._buf_gray_prev, self._buf_gray
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
