@@ -10,7 +10,7 @@ This is the result (still in WIP):
 
 ![WIP demo](demo/demo_wip.gif)
 
-
+[Video with OpenCV result](https://youtube.com/shorts/Kg8o_FC7uRk)
 
 ## Requirements
 
