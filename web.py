@@ -203,11 +203,13 @@ def run_websocket_server(
     host: str,
     port: int,
     on_set_latest: Callable[[Callable[[str], None]], None] | None = None,
-) -> Callable[[str], None]:
+) -> tuple[Callable[[str], None], Callable[[], int]]:
     """
     Start WebSocket server in a background thread.
 
-    Returns a setter function to push JSON strings to all connected clients.
+    Returns ``(setter, client_count)`` where *setter* pushes JSON strings
+    to all connected clients and *client_count* returns the current number
+    of connected WebSocket clients.
     Stores the setter on push_tracking_web._default_setter for use when no
     setter is passed. If on_set_latest is provided, it is called with the
     setter (for testing).
@@ -279,10 +281,13 @@ def run_websocket_server(
             import traceback
             traceback.print_exc()
 
+    def client_count() -> int:
+        return len(clients)
+
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     print(f"WebSocket server on ws://{host}:{port} (start core first, then open web page)")
-    return set_latest
+    return set_latest, client_count
 
 
 def push_tracking_web(data: dict, setter: Callable[[str], None] | None = None) -> None:

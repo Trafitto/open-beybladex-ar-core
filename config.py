@@ -416,3 +416,15 @@ WALL_FLASH_COLOR = (255, 180, 0)
 # Web SFX output (--web)
 WEB_WS_HOST = "127.0.0.1"
 WEB_WS_PORT = 8765
+
+# Play mode (--play): countdown before each tracking round
+# Seconds with no bey detected before restarting countdown
+PLAY_NO_TRACK_TIMEOUT = 10.0
+# Per-phase durations (seconds) for the Italian countdown
+PLAY_COUNTDOWN_DURATIONS = {
+    "tre": 1.0,
+    "due": 1.0,
+    "uno": 1.0,
+    "prontii": 1.5,
+    "lancio": 1.0,
+}
