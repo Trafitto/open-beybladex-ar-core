@@ -8,6 +8,7 @@ Use -e/--effect to enable trail SFX under each bey.
 Use -w/--web to broadcast tracking data via WebSocket for open_beybladex_ar_web SFX projection.
 Use -c/--config to manually configure the arena (red zone + rail mask).
 Use -l/--low-light to apply a low-light preset (higher exposure/gain, relaxed thresholds).
+Use -p/--play to enable play mode with Italian countdown before each tracking round.
 """
 import argparse
 import os
@@ -43,6 +44,7 @@ from physics import CollisionDetector, detect_wall_collisions
 from preprocess import preprocess_frame_hsv_from_config
 from tracker import BeyTracker
 from utils import get_bey_label
+from play_mode import PlayModeController, PlayState
 from web import build_tracking_data, push_tracking_web, run_websocket_server
 
 
@@ -98,11 +100,17 @@ def _run_main_loop(
     wall_hit_remaining: dict[int, int] = {}
     frame_index = 0
     ws_setter = None
+    ws_client_count = lambda: 0
     if args.web:
         ws_host = getattr(config, "WEB_WS_HOST", "127.0.0.1")
         ws_port = getattr(config, "WEB_WS_PORT", 8765)
-        ws_setter = run_websocket_server(ws_host, ws_port)
+        ws_setter, ws_client_count = run_websocket_server(ws_host, ws_port)
         time.sleep(0.3)
+
+    play_enabled = args.play and args.web
+    if args.play and not args.web:
+        print("Warning: -p/--play requires -w/--web -- play mode disabled")
+    play_ctrl = PlayModeController(enabled=play_enabled)
 
     proc_w = getattr(config, "PROCESS_WIDTH", 0)
     proc_h = getattr(config, "PROCESS_HEIGHT", 0)
@@ -127,8 +135,13 @@ def _run_main_loop(
             dt = 1.0 / (video_fps or config.TARGET_FPS)
 
         processed = preprocess_frame_hsv_from_config(frame, config)
-        tracker.update(processed, dt)
-        states = tracker.get_states()
+        if play_ctrl.is_tracking_enabled():
+            tracker.update(processed, dt)
+            states = tracker.get_states()
+        else:
+            states = []
+        play_ctrl.update(len(states), ws_client_count() > 0)
+
         positions = [b.position for b in states]
         velocities = [b.velocity for b in states]
         collision_margin = max(getattr(config, "BEY_COLLISION_MARGIN_PX", 2), 1)
@@ -224,6 +237,8 @@ def _run_main_loop(
                 wall_hit_tolerance_mm=getattr(config, "WALL_HIT_TOLERANCE_MM", 15.0),
                 pocket_angle_rad=pocket_angle_rad,
             )
+            if play_ctrl.state is not PlayState.DISABLED:
+                data["playMode"] = play_ctrl.get_countdown_data()
             push_tracking_web(data, ws_setter)
 
         if args.save and out_writer is None:
@@ -334,6 +349,11 @@ def main() -> None:
         "-l", "--low-light",
         action="store_true",
         help="Apply low-light preset: higher exposure/gain, aggressive CLAHE, relaxed thresholds"
+    )
+    parser.add_argument(
+        "-p", "--play",
+        action="store_true",
+        help="Enable play mode: Italian countdown before each tracking round (requires -w)"
     )
     args = parser.parse_args()
 
