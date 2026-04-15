@@ -304,7 +304,7 @@ DOME_GLARE_S_MAX = 65     # if S below this in bright region, treat as specular
 DOME_EXCLUDE_WEDGE_ENABLED = False
 DOME_EXCLUDE_ANGLE_START = 135   # e.g. exclude bottom-left quadrant
 DOME_EXCLUDE_ANGLE_END = 225
-# DOME_MASK_SAVE_PATH: save path for run_dome_mask_snapshot.py (e.g. output/dome_mask.png)
+# DOME_MASK_SAVE_PATH: optional path for saved dome mask image (e.g. output/dome_mask.png)
 DOME_MASK_SAVE_PATH = "output/dome_mask.png"
 
 # PS3 Eye: wider hue tolerance (25) to accommodate the noisier hue readings

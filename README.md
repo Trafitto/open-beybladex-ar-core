@@ -12,10 +12,12 @@ This is the result (still in WIP):
 
 [Video with OpenCV result](https://youtube.com/shorts/Kg8o_FC7uRk)
 
+[More demos (YouTube playlist)](https://www.youtube.com/playlist?list=PLrNs8uiECbXatd9XZKk8QShOT4uTjQlCy)
+
 ## Requirements
 
 - Python 3.10 or higher
-- Webcam (the program uses `cv2.VideoCapture(0)`)
+- Webcam or video file; default live source uses `config.CAMERA_INDEX` (often `0`) with threaded capture when available
 
 ## Installation
 
@@ -27,8 +29,7 @@ This is the result (still in WIP):
 2. Create and activate a virtual environment:
    ```bash
    python -m venv .venv
-   source .venv/bin/activate   # Linux/macOS
-   # .venv\Scripts\activate   # Windows
+   source .venv/bin/activate
    ```
 
 3. Install dependencies:
@@ -51,113 +52,54 @@ CLI arguments:
 | Flag | Description |
 |------|-------------|
 | `-v` | Video input |
-| `-s` | Save output |
+| `-s` | Save output video |
+| `-o` | Output video path (use with `-s`) |
 | `-d` | Debug |
 | `-e` | Trail/impact effects |
 | `-w` | WebSocket for `open_beybladex_ar_web` SFX projection |
+| `-p` | Play mode: Italian countdown before each tracking round (**requires** `-w`) |
 | `-a` | Manually select arena ROI |
 | `-c` | Configure arena: select red zone (center + edge) then rail mask polygon (8-12 pts along rail) |
 | `-l` | Low-light preset: higher exposure/gain, aggressive CLAHE, relaxed detection thresholds |
 
-### Mask preview tools
+If you have the sibling [open_beybladex_ar_web](https://github.com/Trafitto/open-beybladex-ar-web) repo next to this one, the [Makefile](Makefile) can start core + web together (expects `.venv` in both projects):
 
-Two one-shot scripts capture a frame and save mask images for inspection and tuning.
+| Command | Description |
+|---------|-------------|
+| `make play` | HTTP server on the web app, open browser, then `main.py -w -p -e` (optional `LOW_LIGHT=1` for `-l`) |
+| `make core` | `main.py -w -e` only |
+| `make web` | Static server for the web app only |
 
-#### Rail mask
-
-The rail mask zeroes saturation in the green arena border region before Hough detection, so circles are only detected on the white floor and beyblades. The polygon (or auto-built annulus) defines the **excluded** area. Inside the polygon = tracking zone; outside = rail (masked out).
-
-![Rail mask](demo/rail_mask.png)
-
-*Rail mask example: white = excluded (green rail); black = tracking area*
-
-- **Define manually** with `-c`: click 20 points along the inner edge of the rail, then `[c]` to confirm. Points saved to `RAIL_MASK_POINTS_FILE`.
-- **Preview**:
-
-```bash
-python run_rail_mask_snapshot.py
-```
-
-  Builds and saves the mask, opens it on Linux/macOS. Output: `output/rail_mask.png` (white = excluded region).
-- Config: `RAIL_MASK_SAVE_PATH`, `RAIL_MASK_POINTS_FILE`.
-
-#### Dome mask snapshot
-
-```bash
-python run_dome_mask_snapshot.py
-```
-
-- Grabs one frame from the camera, builds the dome exclusion mask (glare + optional wedge), and saves it.
-- Output: `output/dome_mask.png` (white = excluded) and `output/dome_mask_overlay.png` (frame with excluded regions tinted).
-- Masks specular reflections (config: `DOME_GLARE_V_MIN`, `DOME_GLARE_S_MAX`) and optionally the "Beyblade X" text region (config: `DOME_EXCLUDE_WEDGE_ENABLED`, `DOME_EXCLUDE_ANGLE_START`, `DOME_EXCLUDE_ANGLE_END`).
-- Opens the mask image on Linux/macOS.
-- Config: `DOME_MASK_SAVE_PATH` (default: `output/dome_mask.png`).
+**Rail mask** (optional, via `-c`): A polygon defines the **play area**; saturation is zeroed in the green rail outside it so detection ignores the rim. Use **8–12** clicks along the inner rail edge, then `[c]`. Points persist in `RAIL_MASK_POINTS_FILE` (see `RAIL_MASK_*` in `config.py`).
 
 During execution you will see:
 - Colored circles around detected beyblades (green and blue)
 - Highlighted center and velocity arrow
 - Label with ID and scalar speed
-- **IMPACT!** text at center when the two beyblades touch (center distance < sum of radii)
+- **IMPACT!** text when the collision pipeline confirms an impact (overlap plus filters such as closing speed and minimum overlap; see `CollisionDetector` in [`physics.py`](physics.py)), not on every brief geometric touch.
 
-## Pipeline
+## Processing overview
 
-```
-[Webcam / Video] --> [Frame] --> [Arena Mask (HSV)]
-                                        |
-                                        v
-                              [Hough Circles Detection]
-                                        |
-                                        v
-                              [Identity Assignment]
-                              - nearest-neighbour + prediction
-                              - reference histograms (re-id)
-                              - recovery if stuck at edge
-                                        |
-                                        v
-                              [BeyState: position, velocity, radius]
-                                        |
-                +-----------------------+-----------------------+
-                v                       v                       v
-        [Collision Detect]      [Overlay / Effects]      [WebSocket]
-        (distance < r1+r2)     (trail, impact flash)    (open_beybladex_ar_web)
-```
-
-1. **Input**: webcam (`cv2.VideoCapture(0)`) or video file (`-v path`).
-2. **Arena mask**: HSV mask that excludes white floor and green arena border so Hough detects only beyblades.
-3. **Hough circles**: circle detection with radii in range `HOUGH_MIN_RADIUS`-`HOUGH_MAX_RADIUS`, scaled with frame size.
-4. **Identity assignment**: each circle is assigned to the nearest bey (or predicted position); reference HSV histograms bootstrapped from the first frame and updated on the fly stabilize id0/id1; recovery within `ASSIGN_RECOVERY_FRACTION` if a bey has no circle.
-5. **BeyState**: position (smoothed), velocity, scaled radius.
-6. **Collision**: distance between centers < r1 + r2.
-7. **Output**: overlay circles/arrows, trail and impact flash (`-e`), video save (`-s`), WebSocket for web SFX (`-w`).
-
-## Project Structure
-
-| File / Dir      | Role                                                                 |
-|-----------------|----------------------------------------------------------------------|
-| `main.py`       | Entry point: argparse, main loop orchestration                       |
-| `arena.py`      | Arena ROI setup (manual, config, auto-detect)                        |
-| `preprocess.py` | Frame preprocessing (HSV, CLAHE)                                     |
-| `roi.py`        | Interactive arena ROI selection UI                                  |
-| `overlay/`      | Drawing: debug overlay, effects (trail, impact), main overlay       |
-| `web.py`        | WebSocket server, `build_tracking_data`, push to clients            |
-| `tracker.py`    | `BeyTracker`: Hough circles, identity, Kalman, bey state            |
-| `physics.py`    | Velocity, collision and wall detection                              |
-| `utils.py`      | Position smoothing, Euclidean distance                               |
-| `config.py`     | Tunable parameters (camera, Hough, smoothing, colors, debug)         |
-| `run_rail_mask_snapshot.py` | One-shot: save rail mask for inspection |
-| `run_dome_mask_snapshot.py` | One-shot: save dome mask (glare + wedge) for inspection |
-| `tests/`        | Unit tests for preprocess, physics, web, utils                      |
-
-Run tests: `pytest tests/ -v`
+1. **Input**: live camera (`config.CAMERA_INDEX` or threaded stream) or video file (`-v`).
+2. **Preprocess** (optional): HSV + CLAHE on V and optional saturation scaling ([`preprocess.py`](preprocess.py)), controlled by `HSV_*` in [`config.py`](config.py).
+3. **Arena geometry**: ROI, red/green priority zones, rail polygon, dome glare wedge—configured once or via `-c` / `-a`.
+4. **Detection channel**: inverted grayscale and/or saturation (and related boosts) per config; rail and dome masks remove static rail and specular regions.
+5. **Candidates**: **`DETECTION_METHOD == "contour"`** (default)—global threshold plus optional adaptive threshold, morphology, contour filtering; or **`"hough"`**—`cv2.HoughCircles` with tuned radii.
+6. **Tracks**: match detections to existing beys by distance + **median chip hue** (saturated pixels), Kalman correction/prediction, optional circular-orbit prediction, motion-based registration for new beys.
+7. **Physics**: `CollisionDetector` requires overlap, then applies debouncing, closing speed, overlap depth, relative speed, optional Kalman deflection check, and radius-jump checks before emitting an event; wall hits use the learned rim circle.
+8. **Output**: on-screen overlay (`-d`), effects (`-e`), optional recording (`-s` / `-o`), WebSocket JSON (`-w`), optional play-mode countdown payload (`-p`).
 
 ## Configuration
 
 All tunable parameters are in `config.py`. Use `-d` at runtime to see live detection counts and tracking state.
 
+Run tests: `pytest tests/ -v`
+
 ### Important variables and how they affect tracking
 
 | Variable | Effect of increasing | Effect of decreasing |
 |----------|----------------------|------------------------|
+| **DETECTION_METHOD** | Use `"hough"` for Hough circle detection | Use `"contour"` for threshold + contour pipeline (default); tune `CONTOUR_*`, `ADAPTIVE_THRESH_*` |
 | **HOUGH_DETECTION_CHANNEL** | `"saturation"` = HSV S (better for white floor vs colored chips); `"grayscale"` = luminance | |
 | **HOUGH_SAT_SCALE** | Boost colored chips vs white floor (1.2-1.5); higher = stronger contrast | Lower = raw saturation |
 | **HOUGH_SAT_FLOOR** | Clip values below this to 0; suppress near-white noise (0 = disabled) | |
@@ -171,10 +113,10 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 | **PREFER_HIGH_PRIORITY** | When full, replace edge bey with unmatched center candidate | False = never replace |
 | **REJECT_HUE_RANGES** | Add more hue ranges to exclude (e.g. `[(35, 95)]` for green rail) | Fewer exclusions; set `[]` to disable (needed for green beys) |
 | **REJECT_NEAR_RIM_FRACTION** | Reject circles in outer X of arena; 0.10 = outer 10% (green rail zone) | 0 = disabled; lower = allow beys nearer rim |
-| **RAIL_MASK_ENABLED** | Zero S in green rail region before Hough (stadium is static) | False = no rail mask |
+| **RAIL_MASK_ENABLED** | Zero S in green rail region before detection (stadium is static) | False = no rail mask |
 | **RAIL_MASK_POINTS_FILE** | JSON file for polygon points; load when exists, recreate with `-c` | `output/rail_mask_points.json` |
 | **POLYGON_EDGE_MARGIN** | Reject circles within N px of polygon edge (rail reflections); 0 = disabled | 18 |
-| **DOME_GLARE_ENABLED** | Zero S in specular spots (plastic dome reflections) before Hough | True |
+| **DOME_GLARE_ENABLED** | Zero S in specular spots (plastic dome reflections) before detection | True |
 | **DOME_GLARE_V_MIN** | V above this = potential glare; lower = catch more | 200 |
 | **DOME_GLARE_S_MAX** | S below this in bright region = specular; higher = catch more | 55 |
 | **DOME_EXCLUDE_WEDGE_ENABLED** | Exclude angular wedge where "Beyblade X" text is (0=top, 90=right, 180=bottom) | False |
@@ -187,8 +129,8 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 | **IDENTITY_HUE_MAX_DRIFT** | Stricter hue match (set 0 to disable reject) | No hue-based rejection; any hue accepted |
 | **IDENTITY_BOOTSTRAP_FRAMES** | More samples to lock identity; more robust to spin/incline | Identity locked from first frame only; may be noisy |
 | **MAX_RECOVERY_FRAMES** | Keeps track longer when detection fails briefly | Drops track sooner; useful if tracker sticks to wrong object |
-| **KALMAN_MAX_PREDICTION_DRIFT** | Prediction can travel further when Hough misses | Prediction stays closer to last position; better for slow beys |
-| **KALMAN_MAX_VELOCITY_PX** | Allow higher extrapolated velocity when lost | Reject prediction and hold; rely on Hough to re-acquire (set 0 to disable) |
+| **KALMAN_MAX_PREDICTION_DRIFT** | Prediction can travel further when detection misses | Prediction stays closer to last position; better for slow beys |
+| **KALMAN_MAX_VELOCITY_PX** | Allow higher extrapolated velocity when lost | Reject prediction and hold; rely on detection to re-acquire (set 0 to disable) |
 | **KALMAN_RIM_CLAMP_FRAC** | When bey is in outer band (dist >= this * radius), remove outward velocity | 0.92 = clamp in outer 8%; 0 = disabled |
 | **CIRCULAR_PREDICTION_ENABLED** | Predict along circular arc (orbit) when detectable | Use linear (constant velocity) only |
 | **CIRCULAR_HISTORY_LEN** | More positions for circle fit; smoother orbit estimate | Fewer; faster to adapt, less stable fit |
@@ -199,7 +141,7 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 ### Quick fixes
 
 - **Bey1 and bey2 swap when they cross**: Raise `MATCH_IDENTITY_WEIGHT` (e.g. `8`–`12`), set `IDENTITY_HUE_MAX_DRIFT` (e.g. `35`) to reject bad matches, increase `IDENTITY_BOOTSTRAP_FRAMES` (e.g. `15`) for a stable identity.
-- **Tracker runs away when bey is briefly lost**: Set `KALMAN_MAX_VELOCITY_PX` (e.g. `60`–`100`) to reject extreme predictions and hold position until Hough re-acquires the circle.
+- **Tracker runs away when bey is briefly lost**: Set `KALMAN_MAX_VELOCITY_PX` (e.g. `60`–`100`) to reject extreme predictions and hold position until detection re-acquires the bey.
 - **Tracking stadium rail instead of beys**: Enable `RAIL_MASK_ENABLED = True` (zeros saturation in green rail), set `REJECT_NEAR_RIM_FRACTION = 0.10`, or add `REJECT_HUE_RANGES = [(35, 95)]` (only if not using green beys).
 - **Beys blur and disappear**: Lower `HOUGH_PARAM2` (e.g. `12`–`14`), raise `MATCH_MAX_DISTANCE` and `KALMAN_MAX_PREDICTION_DRIFT`.
 - **Tracker locks onto wrong objects**: Enable `RAIL_MASK_ENABLED`, set `ZERO_VELOCITY_CLEAR_FRAMES = 45` (drop stationary tracks), shrink `ARENA_ROI`, lower `MAX_RECOVERY_FRAMES`.
@@ -208,16 +150,3 @@ All tunable parameters are in `config.py`. Use `-d` at runtime to see live detec
 ## Web SFX Projection
 
 Sibling project [open_beybladex_ar_web](https://github.com/Trafitto/open-beybladex-ar-web) provides a browser-based SFX output for projection. Run the core with `-w`/`--web` to broadcast tracking data via WebSocket. See the web project's README for setup.
-
-
-## Early demos
-
-The first demo shows the tracking output with the debug overlay enabled. The second demo shows the same tracker with simple visual effects applied for testing.
-
-![Demo 1](demo/demo1.gif)
-![Demo 2](demo/demo2.gif)
-
-The core tracker broadcasts bey position, velocity and collision events to the sibling project `open_beybladex_ar_web` via WebSocket (`-w`). That project renders the SFX overlay and projection in the browser. The video below shows the output captured from the web client.
-![Demo 2](demo/test_video_output.gif)
-
-[See more demo on YouTube](https://www.youtube.com/playlist?list=PLrNs8uiECbXatd9XZKk8QShOT4uTjQlCy)
