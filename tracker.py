@@ -57,6 +57,16 @@ def _make_kalman_filter() -> cv2.KalmanFilter:
     return kf
 
 
+def _kalman_flat(a: Any) -> np.ndarray:
+    """Flatten OpenCV Kalman column-vector output to shape (n,) — no dtype coercion.
+
+    OpenCV Kalman matrices are float32. Keeping that dtype avoids needless
+    float64 promotion when reading scalars (tracking math is unchanged vs NumPy 1 /
+    permissive casting); only indexing layout changes for NumPy 2 compatibility.
+    """
+    return np.asarray(a).ravel()
+
+
 def _hue_distance(h1: float, h2: float) -> float:
     """Shortest angular distance between two OpenCV hues (0-180)."""
     d = abs(h1 - h2)
@@ -195,10 +205,8 @@ class BeyState:
             py = self.position[1] + dy * scale
 
         if self._kalman is not None:
-            self.predicted_velocity = (
-                float(self._kalman.statePre[2]),
-                float(self._kalman.statePre[3]),
-            )
+            pre = _kalman_flat(self._kalman.statePre)
+            self.predicted_velocity = (float(pre[2]), float(pre[3]))
         else:
             self.predicted_velocity = None
 
@@ -211,7 +219,7 @@ class BeyState:
                 self.position[0] + self.velocity[0],
                 self.position[1] + self.velocity[1],
             )
-        pred = self._kalman.predict()
+        pred = _kalman_flat(self._kalman.predict())
         return float(pred[0]), float(pred[1])
 
     def update_from_raw(
@@ -223,7 +231,7 @@ class BeyState:
         self._ensure_kalman()
         if self._kalman is not None:
             meas = np.array([[raw_center[0]], [raw_center[1]]], np.float32)
-            corrected = self._kalman.correct(meas)
+            corrected = _kalman_flat(self._kalman.correct(meas))
             raw_center = (float(corrected[0]), float(corrected[1]))
         smoothed = moving_average_position(
             self.position_history,
@@ -268,10 +276,11 @@ class BeyState:
             decay = float(getattr(config, "KALMAN_LOSS_VELOCITY_DECAY", 0.3))
             self._kalman.statePost[2] *= decay
             self._kalman.statePost[3] *= decay
-            pred_x = float(self._kalman.statePost[0])
-            pred_y = float(self._kalman.statePost[1])
-            vel_x = float(self._kalman.statePost[2])
-            vel_y = float(self._kalman.statePost[3])
+            post = _kalman_flat(self._kalman.statePost)
+            pred_x = float(post[0])
+            pred_y = float(post[1])
+            vel_x = float(post[2])
+            vel_y = float(post[3])
             pred_speed = np.sqrt(vel_x * vel_x + vel_y * vel_y)
 
             max_vel = float(getattr(config, "KALMAN_MAX_VELOCITY_PX", 0))
