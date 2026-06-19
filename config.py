@@ -87,9 +87,6 @@ HOUGH_DETECTION_CHANNEL = "combined"
 #   CLAHE clip=2.2 avoids amplifying sensor noise (50dB SNR).
 HOUGH_SAT_SCALE = 1.0
 HOUGH_SAT_FLOOR = 70
-# SAT_BOOST: multiplicative boost on inv-gray where saturation exists.
-# Colored bey chips get amplified; neutral floor stays unchanged.
-SAT_BOOST = 1.4
 HOUGH_SAT_CLAHE_ENABLED = True
 HOUGH_SAT_CLAHE_CLIP = 2.2
 
@@ -128,38 +125,6 @@ CONTOUR_RIM_ERODE = 5
 ADAPTIVE_THRESH_ENABLED = False
 ADAPTIVE_THRESH_BLOCK = 51
 ADAPTIVE_THRESH_C = -20
-
-# Edge detection: Canny edges dilated into blobs, added as 3rd signal in combined mode.
-# Catches bey outlines even when the body brightness matches the floor.
-# EDGE_CANNY_LOW/HIGH: Canny hysteresis thresholds
-# EDGE_DILATE: dilate edges into filled blobs (px radius)
-# EDGE_BOOST: multiplicative boost applied to inv+sat where edges exist (>1 = amplify)
-#   Edges amplify existing signal at object boundaries rather than adding new signal,
-#   preventing floor edges from creating false blobs.
-EDGE_DETECT_ENABLED = True
-EDGE_CANNY_LOW = 50
-EDGE_CANNY_HIGH = 150
-EDGE_DILATE = 3
-EDGE_BOOST = 1.5
-
-# Background subtraction (MOG2): learns what the static arena looks like and
-# highlights anything different (= beys). Very robust regardless of bey color.
-# BG_SUB_HISTORY: frames for background model (300 @ 60fps = 5 seconds)
-# BG_SUB_VAR_THRESHOLD: pixel variance to consider foreground (lower = more sensitive)
-# BG_SUB_LEARNING_RATE: -1 = auto, 0 = don't learn, 0.001-0.01 = slow learning
-# BG_SUB_BLUR: blur the foreground mask to fill gaps (0 = disabled)
-# BG_SUB_BOOST: multiply inv+sat where MOG2 says foreground (>1 = amplify beys)
-# BG_SUB_PENALTY: multiply inv+sat where MOG2 says background (<1 = suppress static noise)
-BG_SUB_ENABLED = False
-BG_SUB_HISTORY = 300
-# Higher variance threshold tolerates OV7725 sensor noise at gain=30
-BG_SUB_VAR_THRESHOLD = 50
-BG_SUB_LEARNING_RATE = 0.002
-BG_SUB_BLUR = 7
-# Mild penalty: don't suppress the inv-gray signal too aggressively
-# in "background" areas -- the bey IS the signal.
-BG_SUB_BOOST = 1.3
-BG_SUB_PENALTY = 0.85
 
 # Motion mask: frame differencing to boost moving objects and suppress static noise.
 # Moving pixels (beys spinning/translating) get their combined signal boosted;
@@ -291,22 +256,6 @@ RED_ZONE_POINTS_FILE = "output/red_zone.json"
 # Enables tracking when bey accelerates along the rail (attack launch)
 RAIL_TRACKING_ALLOW_EDGE = True
 
-# Plastic dome cover: reduces glare/specular reflections and optional text-region exclude
-# DOME_GLARE: zero S in bright specular spots (high V, low S) before Hough
-# PS3 Eye: lower V_MIN (185) because the sensor's dynamic range is narrower --
-#   glare peaks lower than on modern webcams; raised S_MAX (65) to catch
-#   slightly-coloured specular patches the OV772x can produce.
-DOME_GLARE_ENABLED = True
-DOME_GLARE_V_MIN = 185    # V above this = potential glare (lower = catch more)
-DOME_GLARE_S_MAX = 65     # if S below this in bright region, treat as specular
-# DOME_EXCLUDE_WEDGE: optional wedge (degrees) to exclude where "Beyblade X" text is
-# Angles from top (0), clockwise: 90=right, 180=bottom, 270=left. Set to (-1,-1) to disable
-DOME_EXCLUDE_WEDGE_ENABLED = False
-DOME_EXCLUDE_ANGLE_START = 135   # e.g. exclude bottom-left quadrant
-DOME_EXCLUDE_ANGLE_END = 225
-# DOME_MASK_SAVE_PATH: optional path for saved dome mask image (e.g. output/dome_mask.png)
-DOME_MASK_SAVE_PATH = "output/dome_mask.png"
-
 # PS3 Eye: wider hue tolerance (25) to accommodate the noisier hue readings
 #   from the OV772x; slightly faster adapt (0.08) to track the jittery hue.
 COLOR_HUE_TOLERANCE = 25
@@ -346,7 +295,7 @@ CANDIDATE_MIN_SEPARATION = 28
 # KALMAN_MAX_PREDICTION_DRIFT: max px prediction can drift from last real position (higher = track fast rail acceleration)
 # KALMAN_MAX_VELOCITY_PX: when prediction exceeds this velocity (px/frame), reject and hold (0 = no limit; use 0 for rail)
 # Stadium boundary: when bey is near the rim, remove outward velocity component (0.92 = outer 8%)
-KALMAN_RIM_CLAMP_FRAC = 1
+KALMAN_RIM_CLAMP_FRAC = 0.92
 # Circular motion: fit recent positions to circle, predict along arc (Beyblades orbit stadium)
 # CIRCULAR_PREDICTION_ENABLED: use circular model when orbit is detectable
 # CIRCULAR_HISTORY_LEN: positions to keep for circle fit (need 5+ for reliable fit)
@@ -358,6 +307,14 @@ KALMAN_MEASUREMENT_NOISE = 0.15
 KALMAN_LOSS_VELOCITY_DECAY = 0.5
 KALMAN_MAX_PREDICTION_DRIFT = 60
 KALMAN_MAX_VELOCITY_PX = 50
+
+# Previously implicit knobs (were read via getattr defaults only -- now explicit so
+# they are visible and tunable). Values equal the prior hardcoded defaults, so
+# behavior is unchanged until you edit them.
+POCKET_MIN_GAP_DEG = 10          # min angular gap (deg) between beys to call it the launch pocket
+MOTION_THRESHOLD = 12            # per-pixel frame diff for the new-bey motion check (_has_motion_at)
+MOTION_PATCH_RADIUS_MULT = 1.0   # radius multiplier for that motion-check patch
+OVERLAP_RECOVERY_DISTANCE = 0    # px; >0 re-acquires a bey hidden under another (0 = disabled)
 
 # Collision detection
 # COLLISION_COOLDOWN_FRAMES: min frames between collision events

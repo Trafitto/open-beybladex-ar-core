@@ -151,7 +151,6 @@ class BeyState:
     radius: float
     color_hue: float = -1.0
     color_hue_origin: float = -1.0
-    radius_origin: float = -1.0
     position_history: deque = field(
         default_factory=lambda: deque(maxlen=config.SMOOTH_WINDOW_SIZE + 2)
     )
@@ -175,7 +174,7 @@ class BeyState:
             ).reshape(4, 1)
             self._kalman.statePost = self._kalman.statePre.copy()
 
-    def kalman_predict(self) -> Tuple[float, float]:
+    def kalman_predict(self, dt: float) -> Tuple[float, float]:
         px: float
         py: float
         if getattr(config, "CIRCULAR_PREDICTION_ENABLED", False):
@@ -191,9 +190,9 @@ class BeyState:
                     self._kalman.statePre[2] = np.float32(vx)
                     self._kalman.statePre[3] = np.float32(vy)
             else:
-                px, py = self._linear_predict()
+                px, py = self._linear_predict(dt)
         else:
-            px, py = self._linear_predict()
+            px, py = self._linear_predict(dt)
 
         max_drift = float(getattr(config, "KALMAN_MAX_PREDICTION_DRIFT", 60))
         dx = px - self.position[0]
@@ -212,13 +211,21 @@ class BeyState:
 
         return (px, py)
 
-    def _linear_predict(self) -> Tuple[float, float]:
+    def _linear_predict(self, dt: float) -> Tuple[float, float]:
         self._ensure_kalman()
         if self._kalman is None:
             return (
-                self.position[0] + self.velocity[0],
-                self.position[1] + self.velocity[1],
+                self.position[0] + self.velocity[0] * dt,
+                self.position[1] + self.velocity[1] * dt,
             )
+        # ponytail: scale the predict step by dt relative to the nominal frame
+        # time, so frame-rate jitter doesn't bias how far the bey is predicted to
+        # travel. Velocity state stays in per-nominal-frame units, so the existing
+        # process/measurement-noise tuning is unchanged at steady fps (step == 1).
+        target_fps = float(getattr(config, "TARGET_FPS", 60)) or 60.0
+        step = dt * target_fps
+        self._kalman.transitionMatrix[0, 2] = np.float32(step)
+        self._kalman.transitionMatrix[1, 3] = np.float32(step)
         pred = _kalman_flat(self._kalman.predict())
         return float(pred[0]), float(pred[1])
 
@@ -357,13 +364,6 @@ class BeyTracker:
         self._rail_hue_learned: bool = False
         self._mm_per_pixel: float = 0.0
         self._roi_miss_count: Dict[int, int] = {}
-        self._bg_sub: Optional[Any] = None
-        if getattr(config, "BG_SUB_ENABLED", False):
-            history = int(getattr(config, "BG_SUB_HISTORY", 300))
-            var_thresh = float(getattr(config, "BG_SUB_VAR_THRESHOLD", 50))
-            self._bg_sub = cv2.createBackgroundSubtractorMOG2(
-                history=history, varThreshold=var_thresh, detectShadows=False
-            )
         # Pre-allocated buffers for the per-frame pipeline (sized on first use)
         self._buf_gray: Optional[np.ndarray] = None
         self._buf_gray_prev: Optional[np.ndarray] = None
@@ -917,8 +917,7 @@ class BeyTracker:
         to catch both strong and faint contrast objects.
         Returns list of ((cx, cy), radius).
         """
-        threshold = int(getattr(config, "CONTOUR_THRESHOLD",
-                                       getattr(config, "CONTOUR_SAT_THRESHOLD", 35)))
+        threshold = int(getattr(config, "CONTOUR_THRESHOLD", 60))
         min_area = int(getattr(config, "CONTOUR_MIN_AREA", 150))
         max_area = int(getattr(config, "CONTOUR_MAX_AREA", 8000))
         min_circ = float(getattr(config, "CONTOUR_MIN_CIRCULARITY", 0.25))
@@ -1302,62 +1301,6 @@ class BeyTracker:
                 return
         bey.color_hue = candidate
 
-    def _build_dome_mask(
-        self, hsv: np.ndarray, s_channel: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """Build dome exclusion mask (glare + wedge). Returns uint8 255=excluded, or None."""
-        h, w = hsv.shape[:2]
-        out = np.zeros((h, w), dtype=np.uint8)
-        any_mask = False
-        if getattr(config, "DOME_GLARE_ENABLED", False):
-            v = hsv[:, :, 2]
-            s = s_channel
-            v_min = int(getattr(config, "DOME_GLARE_V_MIN", 220))
-            s_max = int(getattr(config, "DOME_GLARE_S_MAX", 40))
-            glare = ((v >= v_min) & (s < s_max)).astype(np.uint8) * 255
-            out = np.maximum(out, glare)
-            any_mask = any_mask or np.any(glare > 0)
-        if getattr(config, "DOME_EXCLUDE_WEDGE_ENABLED", False):
-            start_deg = float(getattr(config, "DOME_EXCLUDE_ANGLE_START", -1))
-            end_deg = float(getattr(config, "DOME_EXCLUDE_ANGLE_END", -1))
-            if start_deg >= 0 and end_deg >= 0:
-                center = self._rim_circle or self._arena_roi_high or self._arena_roi
-                if center is not None:
-                    cx_roi, cy_roi, _ = center
-                    Y, X = np.ogrid[:h, :w]
-                    dy = Y.astype(np.float32) - cy_roi
-                    dx = X.astype(np.float32) - cx_roi
-                    angle_deg = (np.degrees(np.arctan2(dx, -dy)) + 360) % 360
-                    if start_deg <= end_deg:
-                        wedge = (angle_deg >= start_deg) & (angle_deg <= end_deg)
-                    else:
-                        wedge = (angle_deg >= start_deg) | (angle_deg <= end_deg)
-                    wedge_u8 = wedge.astype(np.uint8) * 255
-                    out = np.maximum(out, wedge_u8)
-                    any_mask = True
-        if not any_mask and (getattr(config, "DOME_GLARE_ENABLED", False) or getattr(config, "DOME_EXCLUDE_WEDGE_ENABLED", False)):
-            return out
-        return out if any_mask else None
-
-    def get_dome_mask(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """Build dome exclusion mask for snapshot/preview. Returns uint8 255=excluded."""
-        if getattr(config, "HOUGH_DETECTION_CHANNEL", "grayscale") != "saturation":
-            return None
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        s = hsv[:, :, 1].astype(np.float32)
-        s *= float(getattr(config, "HOUGH_SAT_SCALE", 1.0))
-        s = np.clip(s, 0, 255).astype(np.uint8)
-        floor = int(getattr(config, "HOUGH_SAT_FLOOR", 0))
-        if floor > 0:
-            s = np.where(s >= floor, s, 0).astype(np.uint8)
-        if getattr(config, "HOUGH_SAT_CLAHE_ENABLED", False):
-            clahe = cv2.createCLAHE(
-                clipLimit=float(getattr(config, "HOUGH_SAT_CLAHE_CLIP", 2.5)),
-                tileGridSize=getattr(config, "HSV_CLAHE_TILE", (8, 8)),
-            )
-            s = clahe.apply(s)
-        return self._build_dome_mask(hsv, s)
-
     # ------------------------------------------------------------------ #
     #  Main update                                                         #
     # ------------------------------------------------------------------ #
@@ -1428,7 +1371,7 @@ class BeyTracker:
         # Store predictions upfront; used for both ROI positioning and matching.
         predictions: Dict[int, Tuple[float, float]] = {}
         for b in self._bey:
-            predictions[b.id] = b.kalman_predict()
+            predictions[b.id] = b.kalman_predict(dt)
 
         # --- 1. Detect bey candidates (ROI fast-path when tracking) ---
         circles = self._detect_candidates(channel, frame.shape, predictions)
@@ -1602,7 +1545,6 @@ class BeyTracker:
                     radius=r,
                     color_hue=hue,
                     color_hue_origin=hue,
-                    radius_origin=r,
                 )
                 self._bey.append(new_bey)
                 if getattr(config, "CIRCULAR_PREDICTION_ENABLED", False):
@@ -1627,7 +1569,7 @@ class BeyTracker:
             and len(self._bey) == config.MAX_BEY_COUNT
             and config.MAX_BEY_COUNT > 1
         ):
-            hcx, hcy, hr = self._arena_roi_high
+            hcx, hcy, _ = self._arena_roi_high
             high_unmatched = [
                 (ci, candidates[ci])
                 for ci in unmatched_indices
@@ -1661,7 +1603,6 @@ class BeyTracker:
                             radius=r,
                             color_hue=hue,
                             color_hue_origin=hue,
-                            radius_origin=r,
                         )
                         self._bey.append(new_bey)
                         if getattr(config, "CIRCULAR_PREDICTION_ENABLED", False):
@@ -1806,7 +1747,3 @@ class BeyTracker:
 
     def is_bootstrapped(self) -> bool:
         return self._bootstrapped
-
-    def get_debug_masks(self, frame: np.ndarray) -> Dict[int, np.ndarray]:
-        """No colour masks in this pipeline -- returns empty dict."""
-        return {}

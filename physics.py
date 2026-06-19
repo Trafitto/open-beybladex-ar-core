@@ -110,8 +110,6 @@ def detect_wall_collisions(
 @dataclass
 class CollisionEvent:
     """Represents a single collision between two beyblades."""
-    bey_id_a: int
-    bey_id_b: int
     position: Tuple[float, float]
     relative_speed: float
     impact_force: float
@@ -246,8 +244,6 @@ class CollisionDetector:
         impact_force = relative_speed * max(overlap_depth, 1.0)
 
         event = CollisionEvent(
-            bey_id_a=0,
-            bey_id_b=1,
             position=(impact_x, impact_y),
             relative_speed=relative_speed,
             impact_force=impact_force,
@@ -256,10 +252,6 @@ class CollisionDetector:
         )
         self._events.append(event)
         return event
-
-    @property
-    def is_overlapping(self) -> bool:
-        return self._last_overlapping
 
     @property
     def events(self) -> List[CollisionEvent]:

@@ -20,7 +20,6 @@ class TrackerLike(Protocol):
     def get_rim_circle(self): ...
     def get_rail_mask(self): ...
     def get_polygon_points(self): ...
-    def get_debug_masks(self, frame: np.ndarray): ...
 
 
 class CollisionDetectorLike(Protocol):
@@ -74,7 +73,6 @@ def draw_debug_overlay(
         y_pos += 18
 
     swatch_x = 8
-    overlay_colors = [color_bey_1, color_bey_2]
     for slot, b in enumerate(sorted_states):
         if b.color_hue < 0:
             continue
@@ -126,14 +124,6 @@ def draw_debug_overlay(
         r_zone = blade_r + margin
         cv2.circle(frame, (cx, cy), r_bey, (180, 180, 180), 1)
         cv2.circle(frame, (cx, cy), r_zone, (255, 0, 255), 1)
-
-    masks = tracker.get_debug_masks(frame)
-    if masks:
-        overlay = frame.copy()
-        for bey_id, mask in masks.items():
-            oc = overlay_colors[bey_id % 2]
-            overlay[mask > 0] = oc
-        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
 
 
 def draw_debug_overlay_from_config(

@@ -82,8 +82,8 @@ During execution you will see:
 
 1. **Input**: live camera (`config.CAMERA_INDEX` or threaded stream) or video file (`-v`).
 2. **Preprocess** (optional): HSV + CLAHE on V and optional saturation scaling ([`preprocess.py`](preprocess.py)), controlled by `HSV_*` in [`config.py`](config.py).
-3. **Arena geometry**: ROI, red/green priority zones, rail polygon, dome glare wedge—configured once or via `-c` / `-a`.
-4. **Detection channel**: inverted grayscale and/or saturation (and related boosts) per config; rail and dome masks remove static rail and specular regions.
+3. **Arena geometry**: ROI, red/green priority zones, rail polygon—configured once or via `-c` / `-a`.
+4. **Detection channel**: inverted grayscale and/or saturation (and related boosts) per config; the rail mask removes the static rail region.
 5. **Candidates**: **`DETECTION_METHOD == "contour"`** (default)—global threshold plus optional adaptive threshold, morphology, contour filtering; or **`"hough"`**—`cv2.HoughCircles` with tuned radii.
 6. **Tracks**: match detections to existing beys by distance + **median chip hue** (saturated pixels), Kalman correction/prediction, optional circular-orbit prediction, motion-based registration for new beys.
 7. **Physics**: `CollisionDetector` requires overlap, then applies debouncing, closing speed, overlap depth, relative speed, optional Kalman deflection check, and radius-jump checks before emitting an event; wall hits use the learned rim circle.
@@ -116,10 +116,6 @@ Run tests: `pytest tests/ -v`
 | **RAIL_MASK_ENABLED** | Zero S in green rail region before detection (stadium is static) | False = no rail mask |
 | **RAIL_MASK_POINTS_FILE** | JSON file for polygon points; load when exists, recreate with `-c` | `output/rail_mask_points.json` |
 | **POLYGON_EDGE_MARGIN** | Reject circles within N px of polygon edge (rail reflections); 0 = disabled | 18 |
-| **DOME_GLARE_ENABLED** | Zero S in specular spots (plastic dome reflections) before detection | True |
-| **DOME_GLARE_V_MIN** | V above this = potential glare; lower = catch more | 200 |
-| **DOME_GLARE_S_MAX** | S below this in bright region = specular; higher = catch more | 55 |
-| **DOME_EXCLUDE_WEDGE_ENABLED** | Exclude angular wedge where "Beyblade X" text is (0=top, 90=right, 180=bottom) | False |
 | **DEBUG_HIDE_RED_CIRCLE_WHEN_POLYGON** | Cleaner overlay: hide red circle when polygon ROI is used | True |
 | **ZERO_VELOCITY_CLEAR_FRAMES** | Drop bey if speed < threshold for N frames (likely wrong object) | 0 = disabled |
 | **COLOR_SAT_MIN** | Stricter: only vivid chips accepted | More permissive: paler chips accepted, risk of white glare |

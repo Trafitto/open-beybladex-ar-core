@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 import time
+from collections import deque
 from typing import Callable, Optional
 
 
@@ -225,6 +226,10 @@ def run_websocket_server(
     clients: set = set()
     loop_ref: dict = {"loop": None}
     new_data_event: dict = {"event": None}
+    # Collision / wall-hit payloads that must never be coalesced away. ponytail:
+    # single-producer (main thread) / single-consumer (loop thread) deque, atomic
+    # append/popleft under the GIL -- no extra lock needed.
+    event_queue: deque = deque()
 
     async def register(ws):
         clients.add(ws)
@@ -233,22 +238,29 @@ def run_websocket_server(
         finally:
             clients.discard(ws)
 
+    async def _send_all(payload: str):
+        dead = []
+        for c in clients:
+            try:
+                await c.send(payload)
+            except Exception:
+                dead.append(c)
+        for c in dead:
+            clients.discard(c)
+
     async def broadcast_loop(event: asyncio.Event):
         last = None
         while True:
             await event.wait()
             event.clear()
+            # Drain one-shot event frames first so an impact/wall-hit is never lost
+            # when several frames coalesce between wakeups.
+            while event_queue:
+                await _send_all(event_queue.popleft())
             payload = latest_ref.get("json")
             if payload is not None and payload != last:
                 last = payload
-                dead = []
-                for c in clients:
-                    try:
-                        await c.send(payload)
-                    except Exception:
-                        dead.append(c)
-                for c in dead:
-                    clients.discard(c)
+                await _send_all(payload)
 
     latest_ref: dict = {"json": None}
 
@@ -259,8 +271,13 @@ def run_websocket_server(
             asyncio.create_task(broadcast_loop(event))
             await asyncio.Future()
 
-    def set_latest(s: str):
-        latest_ref["json"] = s
+    def set_latest(s: str, force: bool = False):
+        # force=True (impact / wall-hit frame) -> queue it so a newer position-only
+        # frame can't overwrite it before the broadcaster wakes.
+        if force:
+            event_queue.append(s)
+        else:
+            latest_ref["json"] = s
         evt = new_data_event.get("event")
         lo = loop_ref.get("loop")
         if evt is not None and lo is not None:
@@ -290,17 +307,18 @@ def run_websocket_server(
     return set_latest, client_count
 
 
-def push_tracking_web(data: dict, setter: Callable[[str], None] | None = None) -> None:
+def push_tracking_web(data: dict, setter: Callable[..., None] | None = None) -> None:
     """
     Push tracking data as JSON to WebSocket clients.
 
     If setter is None, uses the default global from run_websocket_server.
     Pass setter explicitly for testability.
+
+    Impact / wall-hit frames are one-shot, so they are flagged (force=True) and the
+    server queues them instead of letting a later position-only frame coalesce them away.
     """
     payload = json.dumps(data, separators=(",", ":"))
-    if setter is not None:
-        setter(payload)
-    else:
-        _default_setter = getattr(push_tracking_web, "_default_setter", None)
-        if _default_setter is not None:
-            _default_setter(payload)
+    is_event = bool(data.get("collision")) or bool(data.get("wallHits"))
+    target = setter if setter is not None else getattr(push_tracking_web, "_default_setter", None)
+    if target is not None:
+        target(payload, force=is_event)

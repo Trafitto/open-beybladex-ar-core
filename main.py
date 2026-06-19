@@ -54,8 +54,6 @@ def _live_preview(cap, *, proc_w: int = 0, proc_h: int = 0) -> "np.ndarray | Non
     Returns the frozen (and optionally resized) frame, or None if the user
     pressed 'q' to abort.
     """
-    import numpy as np  # local to avoid top-level import cost when unused
-
     win = "Live Preview - press SPACE to freeze, Q to abort"
     print("Live preview: press SPACE to freeze the frame for calibration, Q to abort")
     while True:
@@ -115,7 +113,12 @@ def _run_main_loop(
     proc_w = getattr(config, "PROCESS_WIDTH", 0)
     proc_h = getattr(config, "PROCESS_HEIGHT", 0)
 
+    # Per-stage timing, averaged and printed every 60 frames under -d, to localize
+    # where the capture->light pipeline spends its time. ponytail: dict accumulator.
+    perf = {"cap": 0.0, "proc": 0.0, "push": 0.0, "dt": 0.0, "n": 0}
+
     while True:
+        _t0 = time.perf_counter()
         ret, frame = cap.read()
         if not ret or frame is None:
             break
@@ -134,6 +137,7 @@ def _run_main_loop(
         if dt <= 0:
             dt = 1.0 / (video_fps or config.TARGET_FPS)
 
+        _t_cap = time.perf_counter()
         processed = preprocess_frame_hsv_from_config(frame, config)
         if play_ctrl.is_tracking_enabled():
             tracker.update(processed, dt)
@@ -188,6 +192,54 @@ def _run_main_loop(
                     if config.DEBUG_PRINT:
                         print(f"WALL HIT bey#{bid}")
 
+        _t_proc = time.perf_counter()
+        # Push tracking data to the web SFX client BEFORE drawing the local
+        # overlay/effects: those cosmetics only matter for the operator's OpenCV
+        # window, and drawing them first delayed the projected light by their
+        # per-frame cost. ponytail: data send hoisted above the draw calls.
+        if args.web and ws_setter:
+            h, w = frame.shape[:2]
+            sorted_states = sorted(states, key=lambda b: b.id)
+            identities = [
+                get_bey_label(b, i, getattr(config, "BEY_IDENTITIES", None))
+                for i, b in enumerate(sorted_states)
+            ]
+            arena_center = tracker.get_arena_center_px()
+            data = build_tracking_data(
+                w, h, states, collision, impact_center, wall_hits,
+                collision_detector.event_count,
+                collision_event=collision_event,
+                radius_scale=config.BEY_RADIUS_SCALE,
+                blade_radius_px=blade_r,
+                identities=identities,
+                mm_per_pixel=tracker.mm_per_pixel,
+                arena_center_px=arena_center,
+                arena_radius_px=tracker.get_arena_radius_px(),
+                wall_hit_tolerance_mm=getattr(config, "WALL_HIT_TOLERANCE_MM", 15.0),
+                pocket_angle_rad=pocket_angle_rad,
+            )
+            if play_ctrl.state is not PlayState.DISABLED:
+                data["playMode"] = play_ctrl.get_countdown_data()
+            push_tracking_web(data, ws_setter)
+
+        if args.debug:
+            _t_push = time.perf_counter()
+            perf["cap"] += _t_cap - _t0
+            perf["proc"] += _t_proc - _t_cap
+            perf["push"] += _t_push - _t_proc
+            perf["dt"] += dt
+            perf["n"] += 1
+            if perf["n"] >= 60:
+                n = perf["n"]
+                fps = n / perf["dt"] if perf["dt"] > 0 else 0.0
+                pipe_ms = 1000.0 * (perf["cap"] + perf["proc"] + perf["push"]) / n
+                print(
+                    f"[perf] {fps:5.1f} fps | capture {1000*perf['cap']/n:5.2f}  "
+                    f"process {1000*perf['proc']/n:5.2f}  push {1000*perf['push']/n:5.2f} ms"
+                    f" | capture->light {pipe_ms:5.2f} ms/frame"
+                )
+                perf = {"cap": 0.0, "proc": 0.0, "push": 0.0, "dt": 0.0, "n": 0}
+
         if args.effect:
             draw_trail_effect_from_config(frame, states, trail_history, config)
             if impact_effect_remaining > 0:
@@ -216,31 +268,6 @@ def _run_main_loop(
                 frame, tracker, collision_detector, frame_index, config
             )
 
-        if args.web and ws_setter:
-            h, w = frame.shape[:2]
-            sorted_states = sorted(states, key=lambda b: b.id)
-            identities = [
-                get_bey_label(b, i, getattr(config, "BEY_IDENTITIES", None))
-                for i, b in enumerate(sorted_states)
-            ]
-            arena_center = tracker.get_arena_center_px()
-            data = build_tracking_data(
-                w, h, states, collision, impact_center, wall_hits,
-                collision_detector.event_count,
-                collision_event=collision_event,
-                radius_scale=config.BEY_RADIUS_SCALE,
-                blade_radius_px=blade_r,
-                identities=identities,
-                mm_per_pixel=tracker.mm_per_pixel,
-                arena_center_px=arena_center,
-                arena_radius_px=tracker.get_arena_radius_px(),
-                wall_hit_tolerance_mm=getattr(config, "WALL_HIT_TOLERANCE_MM", 15.0),
-                pocket_angle_rad=pocket_angle_rad,
-            )
-            if play_ctrl.state is not PlayState.DISABLED:
-                data["playMode"] = play_ctrl.get_countdown_data()
-            push_tracking_web(data, ws_setter)
-
         if args.save and out_writer is None:
             if getattr(args, "output", None):
                 out_path = args.output
@@ -259,8 +286,7 @@ def _run_main_loop(
             out_writer.write(frame)
 
         if args.debug and raw_frame is not None:
-            thresh = int(getattr(config, "CONTOUR_THRESHOLD",
-                                 getattr(config, "CONTOUR_SAT_THRESHOLD", 90)))
+            thresh = int(getattr(config, "CONTOUR_THRESHOLD", 60))
             rail_mask = tracker.get_rail_mask()
 
             # Mirror the tracker's simplified detection channel
@@ -367,7 +393,6 @@ def main() -> None:
             "ADAPTIVE_THRESH_ENABLED": True,
             "COLOR_SAT_MIN": 10,
             "COLOR_VAL_MIN": 10,
-            "DOME_GLARE_V_MIN": 220,
         }
         for key, val in overrides.items():
             setattr(config, key, val)
